@@ -42,6 +42,17 @@ const copyToClipboard = async (text: string) => {
   }
 };
 
+const sanitizeForCSV = (value: any) => {
+    if (value === null || value === undefined) return '';
+    const str = String(value);
+    // Prevent Formula Injection (CSV Injection)
+    // If value starts with =, +, -, or @, prepend a single quote to force text interpretation
+    if (['=', '+', '-', '@'].includes(str.charAt(0))) {
+        return "'" + str;
+    }
+    return str;
+};
+
 interface ColumnDef {
   id: string; 
   name: string;
@@ -647,10 +658,20 @@ export default function DatabaseExplorer({ projectId }: { projectId: string }) {
       const rowsToExport = selectedRows.size > 0 
           ? tableData.filter(r => selectedRows.has(r[pkCol]))
           : tableData;
+      
+      // SANITIZE DATA FOR EXPORT
+      const sanitizedRows = rowsToExport.map(row => {
+          const cleanRow: any = {};
+          Object.keys(row).forEach(key => {
+              cleanRow[key] = sanitizeForCSV(row[key]);
+          });
+          return cleanRow;
+      });
+
       const fileName = `${selectedTable}_export_${new Date().toISOString().slice(0,10)}`;
 
       if (format === 'xlsx') {
-          const ws = window.XLSX.utils.json_to_sheet(rowsToExport);
+          const ws = window.XLSX.utils.json_to_sheet(sanitizedRows);
           const wb = window.XLSX.utils.book_new();
           window.XLSX.utils.book_append_sheet(wb, ws, "Data");
           window.XLSX.writeFile(wb, `${fileName}.xlsx`);
@@ -659,7 +680,7 @@ export default function DatabaseExplorer({ projectId }: { projectId: string }) {
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a'); a.href = url; a.download = `${fileName}.json`; a.click();
       } else if (format === 'csv') {
-          const ws = window.XLSX.utils.json_to_sheet(rowsToExport);
+          const ws = window.XLSX.utils.json_to_sheet(sanitizedRows);
           const csv = window.XLSX.utils.sheet_to_csv(ws);
           const blob = new Blob([csv], { type: 'text/csv' });
           const url = URL.createObjectURL(blob);
