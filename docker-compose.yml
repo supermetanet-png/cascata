@@ -1,11 +1,7 @@
-
 services:
   nginx:
     image: nginx:alpine
     container_name: cascata-nginx
-    # Mapeamento de portas dinâmico.
-    # VPS/Standalone: Usa 80:80 e 443:443 (Definido no .env)
-    # EasyPanel/PaaS: Se der conflito, altere APP_HTTP_PORT no .env para 3005
     ports:
       - "${APP_HTTP_PORT:-80}:80"
       - "${APP_HTTPS_PORT:-443}:443"
@@ -20,6 +16,20 @@ services:
       - frontend
     restart: always
 
+  # NOVO: Sidecar de Segurança
+  # Único serviço com permissão para reiniciar o Nginx
+  nginx_controller:
+    build:
+      context: ./nginx-controller
+      dockerfile: Dockerfile
+    container_name: cascata-nginx-controller
+    environment:
+      - NGINX_CONTAINER_NAME=cascata-nginx
+      - INTERNAL_CTRL_SECRET=${INTERNAL_CTRL_SECRET:-fallback_secret}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: always
+
   backend_control:
     build: 
       context: ./backend
@@ -29,12 +39,12 @@ services:
       - SERVICE_MODE=CONTROL_PLANE
       - SYSTEM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}
       - SYSTEM_JWT_SECRET=${SYSTEM_JWT_SECRET}
+      - INTERNAL_CTRL_SECRET=${INTERNAL_CTRL_SECRET:-fallback_secret}
       - PORT=3000
-      - NGINX_CONTAINER_NAME=cascata-nginx
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock # PERMISSÃO CRÍTICA PARA RELOAD
+      # REMOVIDO: /var/run/docker.sock (Segurança Aumentada)
       - acme_challenge:/var/www/html/.well-known/acme-challenge
       - certs:/etc/letsencrypt
       - storage_data:/app/../storage
@@ -44,6 +54,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      nginx_controller:
+        condition: service_started
     restart: always
 
   backend_data:

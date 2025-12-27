@@ -2,44 +2,50 @@ import fs from 'fs';
 import path from 'path';
 import { spawn, execSync } from 'child_process';
 import { Pool } from 'pg';
+import axios from 'axios';
 
 export type CertProvider = 'letsencrypt' | 'certbot' | 'manual' | 'cloudflare_pem';
 
 /**
  * CertificateService
  * Gerencia a emissão, renovação e instalação de certificados SSL.
- * Também controla a geração de arquivos de configuração do Nginx (SNI dinâmico).
+ * Comunica-se com o Nginx-Controller para reloads seguros.
  */
 export class CertificateService {
   private static basePath = '/etc/letsencrypt/live'; 
   private static systemCertPath = '/etc/letsencrypt/live/system';
   private static webrootPath = '/var/www/html';
   private static nginxDynamicRoot = '/etc/nginx/conf.d/dynamic';
+  
+  // Sidecar Configuration
+  private static CONTROLLER_URL = 'http://nginx-controller:3001';
+  private static INTERNAL_SECRET = process.env.INTERNAL_CTRL_SECRET || 'fallback_secret';
 
   private static validateDomain(domain: string): boolean {
     if (!domain || typeof domain !== 'string') return false;
     const clean = domain.trim();
     if (clean.includes(' ')) return false;
     if (!clean.includes('.')) return false;
-    // Regex rigoroso para FQDN
     const regex = /^([a-zA-Z0-9\u00a1-\uffff]([a-zA-Z0-9\u00a1-\uffff-]{0,61}[a-zA-Z0-9\u00a1-\uffff])?\.)+[a-zA-Z\u00a1-\uffff]{2,}$/;
     return regex.test(clean);
   }
 
-  public static reloadNginx() {
-      const containerName = process.env.NGINX_CONTAINER_NAME || 'cascata-nginx';
+  /**
+   * Solicita reload do Nginx via Sidecar (Isolamento de Docker Socket)
+   */
+  public static async reloadNginx() {
       try {
-          execSync(`docker exec ${containerName} nginx -s reload`);
-          console.log('[CertService] Nginx reloaded successfully.');
+          console.log('[CertService] Requesting Nginx reload via Controller...');
+          await axios.post(`${this.CONTROLLER_URL}/reload`, {}, {
+              headers: { 'x-internal-secret': this.INTERNAL_SECRET }
+          });
+          console.log('[CertService] Nginx reload signal sent.');
       } catch (e: any) {
-          console.warn(`[CertService] Nginx reload skipped (Container ${containerName} unreachable or socket missing).`);
+          console.error(`[CertService] Failed to reload Nginx: ${e.message}`);
+          // Não lançamos erro fatal para não derrubar o processo principal, mas logamos crítico
       }
   }
 
-  /**
-   * Garante que existe um certificado "default" para o sistema subir sem erros.
-   * Se não existir, cria um Auto-Assinado (Self-Signed).
-   */
   public static async ensureSystemCert() {
     try {
         if (!fs.existsSync(this.systemCertPath)) {
@@ -71,16 +77,13 @@ export class CertificateService {
       }
   }
 
-  /**
-   * Reconstrói todos os arquivos .conf do Nginx baseados nos projetos do banco.
-   * É vital para roteamento de domínios customizados.
-   */
   public static async rebuildNginxConfigs(systemPool: Pool) {
     console.log('[CertService] Rebuilding Nginx dynamic configurations...');
     try {
       if (!fs.existsSync(this.nginxDynamicRoot)) fs.mkdirSync(this.nginxDynamicRoot, { recursive: true });
 
-      // Limpa configs antigas para evitar "lixo"
+      // Atomic Write Strategy: Write to temp folder then swap? 
+      // For now, clean rebuild is acceptable as backend writes are fast.
       const oldFiles = fs.readdirSync(this.nginxDynamicRoot);
       for (const file of oldFiles) {
         if (file.endsWith('.conf')) fs.unlinkSync(path.join(this.nginxDynamicRoot, file));
@@ -94,7 +97,6 @@ export class CertificateService {
         const certDomain = proj.ssl_certificate_source || proj.custom_domain;
         const certPath = path.join(this.basePath, certDomain);
         
-        // Só gera config se o certificado existir fisicamente
         if (fs.existsSync(path.join(certPath, 'fullchain.pem')) && fs.existsSync(path.join(certPath, 'privkey.pem'))) {
           
           const configContent = `
@@ -110,7 +112,6 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     client_max_body_size 100M;
 
-    # Main Project API
     location / {
         limit_req zone=api_limit burst=50 nodelay;
         limit_conn conn_limit 50;
@@ -124,7 +125,9 @@ server {
           fs.writeFileSync(path.join(this.nginxDynamicRoot, `${proj.slug}.conf`), configContent.trim());
         }
       }
-      this.reloadNginx();
+      
+      await this.reloadNginx(); // Call Sidecar
+      
     } catch (e) {
       console.error('[CertService] Failed to rebuild configs:', e);
     }
@@ -169,8 +172,7 @@ server {
       isSystem: boolean = false
   ): Promise<{ success: boolean, message: string }> {
     
-    if (!this.validateDomain(domain)) throw new Error("Domínio inseguro ou inválido. Use formato: app.dominio.com (sem espaços, minúsculo).");
-    
+    if (!this.validateDomain(domain)) throw new Error("Domínio inseguro.");
     const cleanDomain = domain.trim().toLowerCase();
     const domainDir = path.join(this.basePath, cleanDomain);
     
@@ -179,7 +181,6 @@ server {
       await this.rebuildNginxConfigs(systemPool);
     };
 
-    // MANUAL UPLOAD (PEM)
     if (provider === 'manual' || provider === 'cloudflare_pem' as any) {
         if (!manualData?.cert || !manualData?.key) throw new Error("Cert/Key required.");
         if (!fs.existsSync(this.basePath)) fs.mkdirSync(this.basePath, { recursive: true });
@@ -192,7 +193,6 @@ server {
         return { success: true, message: "Certificados manuais instalados." };
     }
 
-    // CERTBOT (LET'S ENCRYPT)
     if (provider === 'certbot' || provider === 'letsencrypt' as any) {
         if (!email.includes('@')) throw new Error("Email inválido.");
         return new Promise((resolve, reject) => {

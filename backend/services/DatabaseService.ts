@@ -46,7 +46,7 @@ export class DatabaseService {
                 revoked BOOLEAN DEFAULT false,
                 created_at TIMESTAMPTZ DEFAULT now(),
                 expires_at TIMESTAMPTZ NOT NULL,
-                parent_token UUID REFERENCES auth.refresh_tokens(id) -- Support for Token Rotation Families
+                parent_token UUID REFERENCES auth.refresh_tokens(id)
             );
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON auth.refresh_tokens(token_hash);
             CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON auth.refresh_tokens(user_id);
@@ -61,34 +61,53 @@ export class DatabaseService {
                 created_at TIMESTAMPTZ DEFAULT now()
             );
 
-            -- Global Roles & Grants (Idempotent)
+            -- SECURITY HARDENING: Roles & Privileges
             DO $$ 
             BEGIN
-                -- Ensure usage
-                GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-                GRANT USAGE ON SCHEMA auth TO service_role;
+                -- 1. Create standard Supabase-compatible roles
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN; END IF;
                 
-                -- Ensure permissions
+                -- 2. Create the Restricted API Role (The Sandbox)
+                -- This role is used by the backend when serving public API requests.
+                -- It explicitly CANNOT create tables or drop objects.
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'cascata_api_role') THEN 
+                    CREATE ROLE cascata_api_role NOLOGIN; 
+                END IF;
+
+                -- Inherit RLS roles
+                GRANT anon TO cascata_api_role;
+                GRANT authenticated TO cascata_api_role;
+                GRANT service_role TO cascata_api_role;
+
+                -- 3. Schema Usage
+                GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role, cascata_api_role;
+                GRANT USAGE ON SCHEMA auth TO service_role, cascata_api_role;
+                
+                -- 4. Table Permissions (Current Tables)
                 GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
                 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
                 
-                -- Anon & Authenticated need limited access managed by RLS
                 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
                 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
+
+                -- 5. DEFAULT PRIVILEGES (Future Tables)
+                -- This ensures that when the Dashboard creates a new table, the API role automatically gets access
+                -- WITHOUT giving the API role "Superuser" status.
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated;
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
             END $$;
         `);
         
         // Secure Realtime Trigger Function
-        // CRITICAL SECURITY FIX: Never send 'OLD' or 'NEW' row data directly in pg_notify.
-        // Doing so bypasses Row Level Security (RLS) because the notification payload is visible to anyone listening.
-        // Instead, we send only the Primary Key (id) and metadata. The client must fetch the data via API (which enforces RLS).
         await client.query(`
             CREATE OR REPLACE FUNCTION public.notify_changes()
             RETURNS trigger AS $$
             DECLARE
                 record_id text;
             BEGIN
-                -- Try to extract ID if it exists
                 BEGIN
                     IF (TG_OP = 'DELETE') THEN
                         record_id := OLD.id::text;

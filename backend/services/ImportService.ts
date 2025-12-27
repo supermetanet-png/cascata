@@ -7,13 +7,41 @@ import { DatabaseService } from './DatabaseService.js';
 
 export class ImportService {
     
+    // Limite máximo de tamanho descompactado (5GB)
+    private static MAX_UNCOMPRESSED_SIZE = 5 * 1024 * 1024 * 1024;
+    // Taxa máxima de compressão permitida (para evitar zip bombs extremos tipo 42.zip)
+    private static MAX_COMPRESSION_RATIO = 100;
+
     /**
      * Valida se um arquivo ZIP é um backup Cascata válido (.caf)
-     * e retorna o manifesto.
+     * e verifica segurança contra Zip Bombs.
      */
     public static async validateBackup(filePath: string): Promise<any> {
         try {
             const zip = new AdmZip(filePath);
+            const zipEntries = zip.getEntries();
+            
+            let totalSize = 0;
+            let totalCompressed = 0;
+
+            // 1. Security Check: Zip Bomb Detection
+            for (const entry of zipEntries) {
+                totalSize += entry.header.size; // Tamanho original
+                totalCompressed += entry.header.compressedSize;
+                
+                if (totalSize > this.MAX_UNCOMPRESSED_SIZE) {
+                    throw new Error("Arquivo excede o limite máximo de descompressão (5GB). Possível Zip Bomb.");
+                }
+            }
+
+            if (totalCompressed > 0) {
+                const ratio = totalSize / totalCompressed;
+                if (ratio > this.MAX_COMPRESSION_RATIO) {
+                    throw new Error("Arquivo com taxa de compressão suspeita. Rejeitado por segurança.");
+                }
+            }
+
+            // 2. Validate Manifest
             const manifestEntry = zip.getEntry('manifest.json');
             
             if (!manifestEntry) {
@@ -37,7 +65,9 @@ export class ImportService {
      * Executa o processo completo de restauração.
      */
     public static async restoreProject(filePath: string, targetSlug: string, systemPool: Pool) {
-        const tempDir = path.resolve(process.env.TEMP_UPLOAD_ROOT || '../temp_uploads', `restore_${targetSlug}_${Date.now()}`);
+        // Validação de segurança já deve ter ocorrido, mas o path deve ser seguro
+        const safeSlug = targetSlug.replace(/[^a-z0-9-_]/gi, '');
+        const tempDir = path.resolve(process.env.TEMP_UPLOAD_ROOT || '../temp_uploads', `restore_${safeSlug}_${Date.now()}`);
         
         try {
             // 1. Extrair ZIP
@@ -48,7 +78,7 @@ export class ImportService {
             // 2. Ler Manifesto
             const manifestPath = path.join(tempDir, 'manifest.json');
             const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-            const dbName = `cascata_proj_${targetSlug.replace(/-/g, '_')}`;
+            const dbName = `cascata_proj_${safeSlug.replace(/-/g, '_')}`;
 
             // 3. Provisionar Banco de Dados
             console.log(`[Import] Provisioning Database ${dbName}...`);

@@ -1,10 +1,11 @@
-import vm from 'vm';
+import ivm from 'isolated-vm';
 import { Pool } from 'pg';
 
 export class EdgeService {
     
     /**
-     * Executa uma função server-side (Edge Function) em um ambiente sandbox.
+     * Executa uma função server-side (Edge Function) em um ambiente V8 ISOLADO.
+     * Segurança: Usa isolated-vm para prevenir acesso ao process.env, fs e rede não autorizada.
      * 
      * @param code O código JS da função
      * @param context Objeto com dados da requisição (body, query, headers, user)
@@ -20,74 +21,127 @@ export class EdgeService {
         timeoutMs: number = 5000
     ): Promise<{ status: number, body: any }> {
         
-        // 1. Prepare Sandbox Environment
-        // ATENÇÃO: 'vm' não é uma sandbox de segurança completa.
-        // TODO: Migrar para 'isolated-vm' na fase de Hardening.
-        const sandbox = {
-            req: context,
-            res: {
-                status: 200,
-                body: null,
-                json: (data: any) => { sandbox.res.body = data; },
-                send: (data: any) => { sandbox.res.body = data; },
-                setStatus: (code: number) => { sandbox.res.status = code; }
-            },
-            env: envVars,
-            console: {
-                log: (...args: any[]) => console.log(`[EDGE LOG]`, ...args),
-                error: (...args: any[]) => console.error(`[EDGE ERR]`, ...args),
-            },
-            fetch: global.fetch, // Permite chamadas HTTP externas
+        // 1. Criação da Isolate (Heap separado, 128MB limite)
+        const isolate = new ivm.Isolate({ memoryLimit: 128 });
+        const scriptContext = await isolate.createContext();
+        const jail = scriptContext.global;
+
+        try {
+            // 2. Injeção de Globais Seguras
+            await jail.set('global', jail.derefInto());
             
-            // Helper de Banco de Dados (Limitado)
-            db: {
-                query: async (sql: string, params: any[] = []) => {
-                    // CUIDADO: Pool Exhaustion Risk
-                    // Na próxima fase, adicionar Circuit Breaker aqui
+            // Injeta console.log (Proxy para o stdout do host)
+            await jail.set('console', new ivm.Reference({
+                log: new ivm.Callback((...args: any[]) => {
+                    console.log('[EDGE LOG]', ...args);
+                }),
+                error: new ivm.Callback((...args: any[]) => {
+                    console.error('[EDGE ERR]', ...args);
+                })
+            }));
+
+            // Injeta Variáveis de Ambiente
+            await jail.set('env', new ivm.ExternalCopy(envVars).copyInto());
+
+            // Injeta Contexto da Requisição
+            await jail.set('req', new ivm.ExternalCopy(context).copyInto());
+
+            // 3. Helper de Banco de Dados (Proxy Assíncrono Seguro)
+            // O código na VM chamará db.query(sql, params) que será executado no Host
+            await jail.set('db', new ivm.Reference({
+                query: new ivm.Reference(async (sql: string, params: any[]) => {
+                    // TODO: Implementar Circuit Breaker na próxima fase
                     const client = await projectPool.connect();
                     try {
                         const result = await client.query(sql, params);
-                        return result.rows;
+                        return new ivm.ExternalCopy(result.rows).copyInto();
+                    } catch (e: any) {
+                        throw new Error(e.message);
                     } finally {
                         client.release();
                     }
-                }
+                })
+            }));
+
+            // Injeta fetch (Simplificado)
+            await jail.set('fetch', new ivm.Reference(async (url: string, init: any) => {
+                const response = await fetch(url, init);
+                const text = await response.text();
+                // Retorna um objeto simplificado serializável
+                return new ivm.ExternalCopy({
+                    status: response.status,
+                    statusText: response.statusText,
+                    text: () => text,
+                    json: () => JSON.parse(text)
+                }).copyInto();
+            }));
+
+            // 4. Compilação e Execução
+            // Envolvemos o código do usuário para suportar async/await top-level simulado
+            const wrappedCode = `
+                (async () => {
+                    const dbProxy = {
+                        query: async (sql, params) => {
+                            return await db.get('query').apply(undefined, [sql, params], { arguments: { copy: true }, result: { promise: true } });
+                        }
+                    };
+                    
+                    const fetchProxy = async (url, init) => {
+                        const res = await fetch.apply(undefined, [url, init], { arguments: { copy: true }, result: { promise: true } });
+                        return {
+                            status: res.status,
+                            statusText: res.statusText,
+                            text: async () => res.text(),
+                            json: async () => res.json()
+                        };
+                    };
+
+                    // Ambiente exposto ao usuário
+                    const userDb = dbProxy;
+                    const userFetch = fetchProxy;
+                    
+                    // Função do usuário inserida aqui
+                    const userFunction = async () => {
+                        ${code}
+                    };
+
+                    try {
+                        const result = await userFunction();
+                        return JSON.stringify(result); // Serializa retorno
+                    } catch (e) {
+                        return JSON.stringify({ error: e.message, isError: true });
+                    }
+                })()
+            `;
+
+            const script = await isolate.compileScript(wrappedCode);
+            
+            const resultStr = await script.run(scriptContext, { 
+                timeout: timeoutMs,
+                promise: true 
+            });
+
+            const result = JSON.parse(resultStr);
+
+            if (result && result.isError) {
+                return { status: 500, body: { error: result.error } };
             }
-        };
 
-        vm.createContext(sandbox);
+            return {
+                status: 200,
+                body: result
+            };
 
-        // 2. Wrap Code (Async IIFE)
-        const wrappedCode = `
-            (async () => {
-                try {
-                    ${code}
-                } catch(e) {
-                    res.setStatus(500);
-                    res.json({ error: e.message });
-                }
-            })();
-        `;
-
-        // 3. Execute
-        const script = new vm.Script(wrappedCode);
-        await script.runInContext(sandbox, {
-            timeout: timeoutMs,
-            displayErrors: true
-        });
-
-        // 4. Wait for Async Result (Polling Simples)
-        // Como o vm.runInContext não espera promises pendentes criadas dentro dele,
-        // precisamos verificar se o usuário chamou res.json() ou res.send().
-        let waited = 0;
-        while (sandbox.res.body === null && waited < timeoutMs) {
-            await new Promise(r => setTimeout(r, 50));
-            waited += 50;
+        } catch (e: any) {
+            console.error("Edge Execution Security Error:", e);
+            if (e.message.includes('isolate is disposed')) {
+                return { status: 504, body: { error: "Execution Timed Out (Hard Limit)" } };
+            }
+            return { status: 500, body: { error: `Runtime Error: ${e.message}` } };
+        } finally {
+            // Garante liberação de memória
+            scriptContext.release();
+            isolate.dispose();
         }
-
-        return {
-            status: sandbox.res.status,
-            body: sandbox.res.body || { error: "Function timed out or returned no data" }
-        };
     }
 }

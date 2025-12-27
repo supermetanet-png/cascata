@@ -1357,4 +1357,4 @@ export default function DatabaseExplorer({ projectId }: { projectId: string }) {
       )}
     </div>
   );
-};
+}
