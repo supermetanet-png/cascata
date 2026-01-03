@@ -98,16 +98,24 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
     setLoadingUsers(true);
     try {
       const token = localStorage.getItem('cascata_token');
+      // Fetch users with higher limit to maintain list behavior
       const [usersRes, projRes, tablesRes] = await Promise.all([
-        fetch(`/api/data/${projectId}/auth/users`, { headers: { 'Authorization': `Bearer ${token}` } }),
+        fetch(`/api/data/${projectId}/auth/users?limit=1000`, { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch('/api/control/projects', { headers: { 'Authorization': `Bearer ${token}` } }),
         fetch(`/api/data/${projectId}/tables`, { headers: { 'Authorization': `Bearer ${token}` } })
       ]);
       
-      setUsers(await usersRes.json());
+      if (!usersRes.ok || !projRes.ok || !tablesRes.ok) {
+          throw new Error("Falha na comunicação com o servidor.");
+      }
+
+      const usersData = await usersRes.json();
+      // Handle both legacy array and new paginated object structure
+      const userList = Array.isArray(usersData) ? usersData : (usersData.data || []);
+      setUsers(userList);
       
       const projects = await projRes.json();
-      const currentProj = projects.find((p: any) => p.slug === projectId);
+      const currentProj = Array.isArray(projects) ? projects.find((p: any) => p.slug === projectId) : null;
       
       // Store Project Info
       setProjectDomain(currentProj?.custom_domain || '');
@@ -136,11 +144,12 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
       
       // Load Tables
       const tables = await tablesRes.json();
-      setAvailableTables(tables.map((t: any) => t.name));
+      setAvailableTables(Array.isArray(tables) ? tables.map((t: any) => t.name) : []);
       setLinkedTables(currentProj?.metadata?.linked_tables || []);
 
-    } catch (e) {
+    } catch (e: any) {
       console.error("Fetch Error", e);
+      setError(e.message || "Erro ao carregar dados.");
     } finally {
       setLoadingUsers(false);
     }
@@ -378,10 +387,9 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
           setLinkIdentityForm({ provider: 'email', identifier: '', password: '' });
           
           // Refresh user data
-          const usersRes = await fetch(`/api/data/${projectId}/auth/users`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` } });
-          const usersData = await usersRes.json();
-          setUsers(usersData);
-          setSelectedUser(usersData.find((u:any) => u.id === selectedUser.id));
+          fetchData();
+          // We can't easily update selectedUser locally without full refetch or complex logic
+          setShowUserModal(false); 
 
       } catch (e: any) {
           setError(e.message);
@@ -401,10 +409,8 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
           if (!res.ok) throw new Error((await res.json()).error);
           
           setSuccess("Identidade removida.");
-          const usersRes = await fetch(`/api/data/${projectId}/auth/users`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` } });
-          const usersData = await usersRes.json();
-          setUsers(usersData);
-          setSelectedUser(usersData.find((u:any) => u.id === selectedUser.id));
+          fetchData();
+          setShowUserModal(false);
       } catch (e: any) { setError(e.message); }
       finally { setExecuting(false); }
   };
@@ -445,6 +451,8 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
   };
 
   const filteredUsers = useMemo(() => {
+    if (!Array.isArray(users)) return [];
+    
     let list = users.filter(u => 
         u.id.includes(searchQuery) || 
         u.identities?.some((i: any) => i.identifier.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -458,7 +466,7 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
   }, [users, searchQuery, sortBy]);
 
   const paginatedUsers = filteredUsers.slice((page - 1) * pageSize, page * pageSize);
-  const totalPages = Math.ceil(filteredUsers.length / pageSize);
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
 
   const isOauth = (s: string) => ['google', 'github', 'facebook', 'twitter'].includes(s);
 
@@ -527,6 +535,7 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
                 <div className="py-20 flex justify-center"><Loader2 className="animate-spin text-indigo-600" size={32} /></div>
              ) : (
                 <div className="space-y-4">
+                   {paginatedUsers.length === 0 && <p className="text-center py-10 text-slate-400 font-bold text-xs uppercase">No users found</p>}
                    {paginatedUsers.map(u => (
                       <div 
                         key={u.id} 
@@ -746,9 +755,11 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
                </div>
                
                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                 {Object.keys(strategies).map(stKey => {
+                 {Object.keys(strategies)
+                   .filter(stKey => !['google', 'github'].includes(stKey)) // Filter out social providers from this list
+                   .map(stKey => {
                     const config = strategies[stKey];
-                    const isDefault = ['email', 'google', 'github'].includes(stKey);
+                    const isDefault = ['email'].includes(stKey);
                     
                     return (
                        <div key={stKey} className={`relative bg-white border rounded-[2.5rem] p-8 shadow-sm transition-all group ${config.enabled ? 'border-indigo-200' : 'border-slate-200 opacity-70'}`}>
@@ -757,8 +768,6 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
                                 {stKey === 'email' && <Mail size={24}/>}
                                 {stKey === 'cpf' && <CreditCard size={24}/>}
                                 {stKey === 'phone' && <Smartphone size={24}/>}
-                                {stKey === 'google' && <Globe size={24}/>}
-                                {stKey === 'github' && <Github size={24}/>}
                                 {!isDefault && <Hash size={24}/>}
                              </div>
                              <button onClick={() => toggleStrategy(stKey)} className={`w-12 h-7 rounded-full p-1 transition-colors ${config.enabled ? 'bg-emerald-500' : 'bg-slate-200'}`}>
