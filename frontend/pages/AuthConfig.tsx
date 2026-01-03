@@ -1263,7 +1263,7 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
                          <div className="flex items-center justify-between bg-slate-50 p-3 rounded-2xl border border-slate-100">
                              <div className="flex flex-col">
                                  <span className="text-xs font-bold text-slate-700">Skip Nonce Check</span>
-                                 <span className="text-[9px] text-slate-400">Security relaxation for legacy clients.</span>
+                                 <span className="text-[9px] text-slate-400">Enable for legacy clients (Less Secure).</span>
                              </div>
                              <button 
                                 onClick={() => setProviderConfig({...providerConfig, skip_nonce: !providerConfig.skip_nonce})}

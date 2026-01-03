@@ -1,4 +1,3 @@
-
 import express, { Request, RequestHandler, NextFunction } from 'express';
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
@@ -164,7 +163,7 @@ const validateMagicBytes = (filePath: string, ext: string): boolean => {
 };
 
 const parseBytes = (sizeStr: string): number => {
-  if (!sizeStr) return 2 * 1024 * 1024; // 2MB Default Fallback
+  if (!sizeStr) return 2 * 1024 * 1024; // 2MB Fallback
   const match = sizeStr.toString().match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?$/);
   if (!match) return parseInt(sizeStr) || 0;
   const num = parseFloat(match[1]);
@@ -213,6 +212,8 @@ const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     
+    // CORRECTION: Added 'x-supabase-api-version' to allowed headers list.
+    // This fixes the "Request header field x-supabase-api-version is not allowed" error.
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-cascata-client,Prefer,Range,x-client-info,x-supabase-auth,content-profile,accept-profile,x-supabase-api-version,x-cascata-signature,x-cascata-event');
     
     // Expose headers for PostgREST pagination
@@ -241,6 +242,8 @@ const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
         // Strict Mode: Check Whitelist
         if (origin && safeOrigins.includes(origin)) {
             res.setHeader('Access-Control-Allow-Origin', origin);
+        } else {
+            // Blocked origin: Don't set header (Browser will block)
         }
     }
 
@@ -277,6 +280,8 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
     let resolutionMethod = 'unknown';
 
     // FIX: Using explicit parameter order and type casting for pgp_sym_decrypt.
+    // $1 = SYS_SECRET (used in Select list) ::text to be safe
+    // $2 = Dynamic identifier (used in Where clause)
     const projectQuery = `
         SELECT 
             id, name, slug, db_name, custom_domain, ssl_certificate_source, blocklist, metadata, status,
@@ -287,11 +292,13 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
     `;
 
     if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
+      // PARAM ORDER: [SECRET, HOST]
       projectResult = await systemPool.query(`${projectQuery} WHERE custom_domain = $2`, [SYS_SECRET, host]);
       if ((projectResult.rowCount ?? 0) > 0) resolutionMethod = 'domain';
     }
 
     if ((!projectResult || (projectResult.rowCount ?? 0) === 0) && slugFromUrl) {
+      // PARAM ORDER: [SECRET, SLUG]
       projectResult = await systemPool.query(`${projectQuery} WHERE slug = $2`, [SYS_SECRET, slugFromUrl]);
       if ((projectResult.rowCount ?? 0) > 0) resolutionMethod = 'slug';
     }
@@ -326,6 +333,7 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
       }
     }
 
+    // Rewrite URL if accessing via Custom Domain so the Express Router can match /api/data/:slug
     if (resolutionMethod === 'domain' && !req.url.startsWith('/api/data/')) {
       req.url = `/api/data/${project.slug}${req.url}`;
     }
@@ -344,15 +352,7 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
     r.project = project;
 
     try {
-      // DYNAMIC POOL CONFIGURATION
-      // Reads max/idle settings from project metadata to prevent connection exhaustion
-      const dbConfig = project.metadata?.db_config || {};
-      
-      r.projectPool = PoolService.get(project.db_name, {
-          max: dbConfig.max_connections,
-          idleTimeoutMillis: dbConfig.idle_timeout_seconds ? dbConfig.idle_timeout_seconds * 1000 : undefined
-      });
-      
+      r.projectPool = PoolService.get(project.db_name);
     } catch (err) {
       res.status(502).json({ error: 'Database Connection Failed' });
       return;
@@ -366,7 +366,9 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
 };
 
 const hostGuard: RequestHandler = async (req: any, res: any, next: any) => {
+    // SECURITY: Se o projeto foi resolvido (por domínio customizado ou slug), PULA o guard.
     if (req.project) return next();
+    
     if (req.path === '/' || req.path === '/health') return next();
 
     try {
@@ -422,41 +424,6 @@ const controlPlaneFirewall: RequestHandler = async (req: any, res: any, next: an
   next();
 };
 
-// --- DYNAMIC BODY PARSER (HARDENING) ---
-// Substitui o middleware global express.json() para evitar DoS e "Noisy Neighbor"
-const dynamicBodyParser: RequestHandler = (req, res, next) => {
-    // SYSTEM HARD CAP: 50MB (Proteção mestre da infra)
-    const SYSTEM_HARD_CAP_BYTES = 50 * 1024 * 1024; 
-    
-    let limitStr = '2mb'; // Default Conservador
-
-    const proj = (req as any).project;
-    if (proj?.metadata?.security?.max_json_size) {
-        limitStr = proj.metadata.security.max_json_size;
-    } 
-    // Defaults inteligentes baseados no tipo de rota
-    else if (req.path.includes('/edge/')) {
-        limitStr = '10mb'; // Edge functions precisam de mais payload
-    } else if (req.path.includes('/import/')) {
-        limitStr = '10mb'; // Manifestos de importação
-    }
-
-    const requestedBytes = parseBytes(limitStr);
-    const safeLimit = Math.min(requestedBytes, SYSTEM_HARD_CAP_BYTES);
-
-    // Aplica o parser
-    express.json({ limit: safeLimit })(req, res, (err) => {
-        if (err) {
-            return res.status(413).json({
-                error: 'Payload Too Large',
-                message: `Request body exceeds the limit of ${formatBytes(safeLimit)}`,
-                code: 'PAYLOAD_TOO_LARGE'
-            });
-        }
-        express.urlencoded({ extended: true, limit: safeLimit })(req, res, next);
-    });
-};
-
 const dynamicRateLimiter: RequestHandler = async (req: any, res: any, next: any) => {
     if (!req.project) return next();
     const forwarded = req.headers['x-forwarded-for'];
@@ -479,6 +446,45 @@ const dynamicRateLimiter: RequestHandler = async (req: any, res: any, next: any)
         res.setHeader('X-RateLimit-Remaining', result.remaining || 0);
     }
     next();
+};
+
+// --- DYNAMIC BODY PARSER (HARDENING) ---
+// Substitui o middleware global express.json() para evitar DoS e "Noisy Neighbor"
+const dynamicBodyParser: RequestHandler = (req, res, next) => {
+    // SYSTEM HARD CAP: 50MB
+    // Proteção final para a RAM do container, independente do que o usuário configurar no DB.
+    // Uploads via Storage usam Stream (Multer), então isso afeta apenas JSON/Text puro.
+    const SYSTEM_HARD_CAP_BYTES = 50 * 1024 * 1024; 
+    
+    let limitStr = '2mb'; // Default Conservador
+
+    // Se temos um projeto resolvido, buscamos a configuração de segurança dele
+    const proj = (req as any).project;
+    if (proj?.metadata?.security?.max_json_size) {
+        limitStr = proj.metadata.security.max_json_size;
+    } 
+    // Defaults inteligentes baseados no tipo de rota
+    else if (req.path.includes('/edge/')) {
+        limitStr = '10mb'; // Edge functions precisam de mais payload (ex: webhooks externos)
+    } else if (req.path.includes('/import/')) {
+        limitStr = '10mb'; // Manifestos de importação
+    }
+
+    const requestedBytes = parseBytes(limitStr);
+    const safeLimit = Math.min(requestedBytes, SYSTEM_HARD_CAP_BYTES);
+
+    // Aplica o parser com o limite calculado
+    express.json({ limit: safeLimit })(req, res, (err) => {
+        if (err) {
+            return res.status(413).json({
+                error: 'Payload Too Large',
+                message: `Request body exceeds the limit of ${formatBytes(safeLimit)}`,
+                code: 'PAYLOAD_TOO_LARGE'
+            });
+        }
+        // Aplica também para form-urlencoded (HTML forms padrão)
+        express.urlencoded({ extended: true, limit: safeLimit })(req, res, next);
+    });
 };
 
 const cascataAuth: RequestHandler = async (req: any, res: any, next: any) => {
@@ -549,6 +555,7 @@ const cascataAuth: RequestHandler = async (req: any, res: any, next: any) => {
   }
 
   // --- ALLOW PUBLIC ROUTES ---
+  // Ensure authorize and callback are accessible without strict JWT (they handle their own logic)
   if (
       req.path.includes('/auth/providers/') || 
       req.path.includes('/auth/callback') || 
@@ -596,8 +603,8 @@ const detectSemanticAction = (method: string, path: string): string | null => {
     if (path.includes('/auth/token') && !path.includes('refresh')) return 'AUTH_LOGIN';
     if (path.includes('/auth/token/refresh')) return 'AUTH_REFRESH';
     if (path.includes('/auth/callback')) return 'AUTH_CALLBACK'; 
-    if (path.includes('/auth/passwordless/start')) return 'AUTH_OTP_REQUEST'; 
-    if (path.includes('/auth/passwordless/verify')) return 'AUTH_OTP_VERIFY'; 
+    if (path.includes('/auth/challenge')) return 'AUTH_CHALLENGE'; 
+    if (path.includes('/auth/verify-challenge')) return 'AUTH_VERIFY';
     if (path.includes('/auth/users') && method === 'POST') return 'AUTH_REGISTER';
     if (path.includes('/storage') && method === 'POST' && path.includes('/upload')) return 'UPLOAD_FILE';
     if (path.includes('/storage') && method === 'DELETE') return 'DELETE_FILE';
@@ -718,14 +725,15 @@ const waitForDatabase = async (retries = 30, delay = 1000): Promise<boolean> => 
   return false;
 };
 
-// APPLY MIDDLEWARES (CORRECTED ORDER FOR DOMAIN RESOLUTION & LOCKING)
-app.use(dynamicCors as any);    // 1. CORS Preflight
-app.use(resolveProject as any); // 2. Identify Project
+// APPLY MIDDLEWARES
+// Order is critical for security and performance
+app.use(dynamicCors as any);    // 1. CORS Preflight (Must handle OPTIONS even before body parsing)
+app.use(resolveProject as any); // 2. Identify Project (Needed to know WHICH body limit to apply)
 app.use(hostGuard as any);      // 3. Block unknown hostnames
 app.use(controlPlaneFirewall as any); // 4. Protect Control Plane
-app.use(dynamicBodyParser as any);    // 5. Intelligent Body Parsing (Hard Cap + Project Config)
-app.use(dynamicRateLimiter as any);   // 6. Rate Limit
-app.use(auditLogger as any);          // 7. Audit
+app.use(dynamicBodyParser as any);    // 5. Intelligent Body Parsing (Uses project metadata from step 2)
+app.use(dynamicRateLimiter as any);   // 6. Rate Limit (Needs project context)
+app.use(auditLogger as any);          // 7. Audit (Needs parsed body for logs)
 app.use(cascataAuth as any);          // 8. Auth/Role Resolution
 
 // Health Check
@@ -968,7 +976,7 @@ const handleRpcExecution = async (req: CascataRequest, res: any, next: NextFunct
         });
         res.json(rows);
     } catch (e: any) { next(e); }
-};
+});
 
 app.post('/api/data/:slug/rpc/:name', async (req: any, res: any, next: NextFunction) => {
     handleRpcExecution(req as CascataRequest, res, next);
@@ -1072,39 +1080,7 @@ app.delete('/api/data/:slug/trigger/:name', async (req: any, res: any, next: Nex
 app.get('/api/data/:slug/auth/users', async (req: any, res: any, next: NextFunction) => {
   const r = req as CascataRequest;
   if (!r.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
-  try {
-      // PAGINATION FIX (MEMORY LEAK PREVENTION)
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 1000); // Hard Limit 1000
-      const offset = (page - 1) * limit;
-
-      // 1. Get Total Count
-      const countRes = await r.projectPool!.query(`SELECT count(*) FROM auth.users`);
-      const total = parseInt(countRes.rows[0].count);
-
-      // 2. Get Paginated Data
-      const result = await r.projectPool!.query(`
-          SELECT 
-            u.id, 
-            u.created_at, 
-            u.banned, 
-            u.last_sign_in_at, 
-            jsonb_agg(jsonb_build_object('id', i.id, 'provider', i.provider, 'identifier', i.identifier)) as identities 
-          FROM auth.users u 
-          LEFT JOIN auth.identities i ON u.id = i.user_id 
-          GROUP BY u.id 
-          ORDER BY u.created_at DESC
-          LIMIT $1 OFFSET $2
-      `, [limit, offset]);
-      
-      // Return enhanced response structure
-      res.json({
-          data: result.rows,
-          total: total,
-          page: page,
-          totalPages: Math.ceil(total / limit)
-      });
-  } catch (e: any) { next(e); }
+  try { const result = await r.projectPool!.query(`SELECT u.id, u.created_at, u.banned, u.last_sign_in_at, jsonb_agg(jsonb_build_object('id', i.id, 'provider', i.provider, 'identifier', i.identifier)) as identities FROM auth.users u LEFT JOIN auth.identities i ON u.id = i.user_id GROUP BY u.id ORDER BY u.created_at DESC`); res.json(result.rows); } catch (e: any) { next(e); }
 });
 
 app.post('/api/data/:slug/auth/users', async (req: any, res: any, next: NextFunction) => {
@@ -2080,13 +2056,49 @@ app.get('/api/control/me/ip', (req: any, res: any) => {
 // --- CONTROL PLANE: AUTH ---
 app.post('/api/control/auth/login', async (req: any, res: any, next: NextFunction) => {
   const { email, password } = req.body;
+  
+  // 1. IP extraction for Lockout Check (Control Plane)
+  const forwarded = req.headers['x-forwarded-for'];
+  const realIp = req.headers['x-real-ip'];
+  const socketIp = req.socket.remoteAddress;
+  let clientIp = (realIp as string) || (forwarded ? (forwarded as string).split(',')[0].trim() : socketIp) || '';
+  clientIp = clientIp.replace('::ffff:', '');
+
+  // Hardcoded stricter config for admin panel
+  const adminSecConfig = { max_attempts: 5, lockout_minutes: 15, strategy: 'hybrid' as const };
+
   try {
+    // 2. Check Lockout
+    const lockout = await RateLimitService.checkAuthLockout('admin_control_plane', clientIp, email, adminSecConfig);
+    if (lockout.locked) {
+        return res.status(429).json({ error: lockout.reason });
+    }
+
     const user = (await systemPool.query('SELECT * FROM system.admin_users WHERE email = $1', [email])).rows[0];
-    if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!user) {
+        await RateLimitService.registerAuthFailure('admin_control_plane', clientIp, email, adminSecConfig);
+        return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
     let isValid = false;
-    if (!user.password_hash.startsWith('$2')) { if (user.password_hash === password) { await systemPool.query('UPDATE system.admin_users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(password, 10), user.id]); isValid = true; } }
-    else isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!user.password_hash.startsWith('$2')) { 
+        if (user.password_hash === password) { 
+            await systemPool.query('UPDATE system.admin_users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(password, 10), user.id]); 
+            isValid = true; 
+        } 
+    }
+    else { 
+        isValid = await bcrypt.compare(password, user.password_hash); 
+    }
+
+    if (!isValid) {
+        await RateLimitService.registerAuthFailure('admin_control_plane', clientIp, email, adminSecConfig);
+        return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    // Success: Clear Failures
+    await RateLimitService.clearAuthFailure('admin_control_plane', clientIp, email);
+
     res.json({ token: jwt.sign({ sub: user.id, role: 'superadmin' }, process.env.SYSTEM_JWT_SECRET!, { expiresIn: '12h' }) });
   } catch (e: any) { next(e); }
 });
@@ -2166,8 +2178,13 @@ app.post('/api/control/projects/:slug/webhooks', async (req: any, res: any, next
   try { await systemPool.query('INSERT INTO system.webhooks (project_slug, target_url, event_type, table_name) VALUES ($1, $2, $3, $4)', [req.params.slug, req.body.target_url, req.body.event_type, req.body.table_name]); res.json({ success: true }); } catch (e: any) { next(e); }
 });
 
+// NEW SECURE LOG DELETION
 app.delete('/api/control/projects/:slug/logs', async (req: any, res: any, next: NextFunction) => {
-  try { await systemPool.query(`DELETE FROM system.api_logs WHERE project_slug = $1 AND created_at < now() - interval '${Number(req.query.days)} days'`, [req.params.slug]); res.json({ success: true }); } catch (e: any) { next(e); }
+  try { 
+      // Calls the secure stored procedure that bypasses the immutability trigger safely
+      await systemPool.query(`SELECT system.purge_old_logs($1, $2)`, [req.params.slug, Number(req.query.days)]); 
+      res.json({ success: true }); 
+  } catch (e: any) { next(e); }
 });
 
 // --- EDGE FUNCTIONS (ENHANCED WITH GLOBALS) ---
@@ -2199,6 +2216,18 @@ app.post('/api/data/:slug/edge/:name', async (req: any, res: any, next: NextFunc
 // 1. Root Handler: Auto-Discovery (OpenAPI)
 app.all('/api/data/:slug/rest/v1', async (req: any, res: any, next: NextFunction) => {
     const r = req as CascataRequest;
+    
+    // SECURITY CHECK: Schema Exposure
+    // Allow system requests (Dashboard/Docs) to proceed.
+    // Block everyone else IF 'schema_exposure' is false/undefined.
+    const isDiscoveryEnabled = r.project.metadata?.schema_exposure === true;
+    if (!r.isSystemRequest && !isDiscoveryEnabled) {
+         return res.status(403).json({ 
+             error: 'API Schema Discovery is disabled.',
+             hint: 'Enable "Schema Exposure" in Project Settings > API Schema Discovery to access this endpoint.'
+         });
+    }
+
     try {
         const protocol = req.headers['x-forwarded-proto'] || 'http';
         const host = req.headers.host;
@@ -2259,17 +2288,12 @@ app.all('/api/data/:slug/rest/v1/:tableName', async (req: any, res: any, next: N
                 // Note: values array contains ONLY filter params (not limit/offset which are baked into SQL string by PostgrestService)
                 // So we can reuse `values` for both queries if they share same WHERE clause params.
                 const countRes = await client.query(countQuery, values);
-                const total = parseInt(countRes.rows[0]?.total || '0');
-                
-                // Calculate Content-Range header
-                // Format: start-end/total
-                // Note: We need to parse limit/offset from query again or assume from result
-                const limit = parseInt(req.query.limit || '0') || result.rows.length; 
-                const offset = parseInt(req.query.offset || '0');
+                const total = parseInt((countRes.rows[0] as any)?.total || '0');
                 
                 // If we haven't executed main query yet, let's do it now
                 const mainRes = await client.query(text, values);
                 
+                const offset = parseInt(req.query.offset || '0');
                 const start = offset;
                 const end = Math.min(offset + mainRes.rows.length - 1, total - 1);
                 
@@ -2298,6 +2322,19 @@ app.all('/api/data/:slug/rest/v1/:tableName', async (req: any, res: any, next: N
 app.use((err: any, req: any, res: any, next: NextFunction) => {
     if (!err.code?.startsWith('2') && !err.code?.startsWith('4')) console.error(`[Global Error] ${req.method} ${req.path}:`, err);
     if (err instanceof multer.MulterError) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.message, code: err.code });
+    
+    // --- AUTH ERROR MAPPING (GoTrue Compat) ---
+    // Critical fix: FlutterFlow crashes if signup/login errors are not specific JSON
+    if (err.message === "User already registered" || err.code === 'user_already_exists') {
+         return res.status(422).json({ error: "user_already_exists", error_description: "User already registered" });
+    }
+    if (err.message === "Invalid login credentials") {
+         return res.status(400).json({ error: "invalid_grant", error_description: "Invalid login credentials" });
+    }
+    if (err.message === "User not found") {
+         return res.status(404).json({ error: "not_found", error_description: "User not found" });
+    }
+
     if (err.code) {
         if (err.code === '23505') return res.status(409).json({ error: 'Conflict: Record exists.', code: err.code });
         if (err.code === '23503') return res.status(400).json({ error: 'Foreign Key Violation.', code: err.code });
@@ -2312,7 +2349,7 @@ app.use((err: any, req: any, res: any, next: NextFunction) => {
 
 (async () => {
   try {
-    console.log('[System] Starting Cascata Secure Engine v9.5 (Production Release)...');
+    console.log('[System] Starting Cascata Secure Engine v9.6 (Production Release)...');
     cleanTempUploads();
     app.listen(PORT, () => console.log(`[CASCATA SECURE ENGINE] Listening on port ${PORT}`));
     CertificateService.ensureSystemCert().catch(e => console.error("Cert Init Error:", e));

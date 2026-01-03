@@ -8,7 +8,8 @@ import axios from 'axios';
 export type CertProvider = 'letsencrypt' | 'certbot' | 'manual' | 'cloudflare_pem';
 
 /**
- * CertificateService v2.3 (Fix: Data Plane Route on Dashboard Domain)
+ * CertificateService v3.0 (Infrastructure Resilience)
+ * Manages SSL certificates and Nginx configuration reloading.
  */
 export class CertificateService {
   private static basePath = '/etc/letsencrypt/live'; 
@@ -37,25 +38,45 @@ export class CertificateService {
           });
           console.log('[CertService] Nginx reload signal sent.');
       } catch (e: any) {
-          console.error(`[CertService] Reload Warning: ${e.message}`);
+          console.error(`[CertService] Reload Warning: ${e.message} (Is nginx_controller running?)`);
       }
   }
 
+  /**
+   * CRITICAL: Ensures a certificate exists before Nginx starts.
+   * If missing, generates a temporary self-signed cert to prevent Nginx boot failure.
+   */
   public static async ensureSystemCert() {
     try {
+        console.log('[CertService] Checking system SSL certificates...');
+        
+        // Ensure directory structure
         if (!fs.existsSync(this.systemCertPath)) {
+            console.log('[CertService] Creating certificate directory structure...');
             fs.mkdirSync(this.systemCertPath, { recursive: true });
         }
         
         const certFile = path.join(this.systemCertPath, 'fullchain.pem');
         const keyFile = path.join(this.systemCertPath, 'privkey.pem');
 
+        // Check if certs exist
         if (!fs.existsSync(certFile) || !fs.existsSync(keyFile)) {
-            console.log('[CertService] Creating fallback self-signed certificate...');
-            execSync(`openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout ${keyFile} -out ${certFile} -subj "/C=US/ST=State/L=City/O=Cascata/CN=localhost"`, { stdio: 'ignore' });
+            console.warn('[CertService] ⚠️ No system certificates found.');
+            console.log('[CertService] 🛠️ Generating temporary self-signed certificate (Bootstrap Mode)...');
+            
+            // Generate Self-Signed Cert using OpenSSL (Available in Alpine)
+            // Valid for 10 years, just enough to let Nginx boot and wait for Certbot
+            const cmd = `openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "${keyFile}" -out "${certFile}" -subj "/C=US/ST=State/L=City/O=Cascata/CN=localhost"`;
+            
+            execSync(cmd, { stdio: 'ignore' });
+            
+            console.log('[CertService] ✅ Temporary certificate generated. Nginx can now start.');
+        } else {
+            console.log('[CertService] ✅ System certificates present.');
         }
     } catch (e) {
-        console.error('[CertService] Failed to ensure system cert:', e);
+        console.error('[CertService] ❌ Failed to ensure system cert:', e);
+        // Do not throw, try to continue boot
     }
   }
 
@@ -117,13 +138,21 @@ export class CertificateService {
       const sysSettings = await systemPool.query("SELECT settings->>'domain' as domain FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'domain_config'");
       const sysDomain = sysSettings.rows[0]?.domain;
 
+      // Always configure dashboard if domain is set, utilizing self-signed fallback if needed
       if (sysDomain && this.validateDomain(sysDomain)) {
-          const certPaths = this.resolveCertPath(sysDomain);
-          if (certPaths) {
-              const sysConfig = this.generateNginxBlock(sysDomain, certPaths, 'frontend', 'http://backend_control:3000');
-              fs.writeFileSync(path.join(this.nginxDynamicRoot, '00_system_dashboard.conf'), sysConfig);
-              console.log(`[CertService] Routed Dashboard: https://${sysDomain}`);
+          let certPaths = this.resolveCertPath(sysDomain);
+          
+          // Fallback to system certs if specific domain certs missing (Bootstrap scenario)
+          if (!certPaths) {
+             certPaths = {
+                 fullchain: path.join(this.systemCertPath, 'fullchain.pem'),
+                 privkey: path.join(this.systemCertPath, 'privkey.pem')
+             };
           }
+
+          const sysConfig = this.generateNginxBlock(sysDomain, certPaths, 'frontend', 'http://backend_control:3000');
+          fs.writeFileSync(path.join(this.nginxDynamicRoot, '00_system_dashboard.conf'), sysConfig);
+          console.log(`[CertService] Routed Dashboard: https://${sysDomain}`);
       }
 
       // 2. Configurar PROJETOS
@@ -157,16 +186,10 @@ export class CertificateService {
     }
   }
 
-  /**
-   * Template Nginx Inteligente (Dual Stack HTTP/HTTPS)
-   * 
-   * Modificado para suportar "Cloudflare Flexible SSL" e rotas de Data Plane no Dashboard.
-   */
   private static generateNginxBlock(domain: string, certs: { fullchain: string, privkey: string }, targetService: 'frontend' | 'backend_data', apiControlUpstream: string | null): string {
       let locationBlocks = '';
 
       if (targetService === 'frontend') {
-          // CORREÇÃO CRÍTICA: Adicionado bloco /api/data/ para o Dashboard Domain
           locationBlocks = `
     location / {
         limit_req zone=api_limit burst=50 nodelay;
@@ -194,7 +217,6 @@ export class CertificateService {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         
-        # Otimizações para SSE e Uploads
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout 86400s;
@@ -216,15 +238,9 @@ export class CertificateService {
           `;
       }
 
-      // Cria a versão HTTP com "Guarda de Redirecionamento"
-      // Injeta a lógica: "Se NÃO é HTTPS (vindo de proxy), então redireciona. Senão, serve o conteúdo."
-      // Isso é feito substituindo o início do bloco location padrão.
       const httpLocationBlocks = locationBlocks.replace(
           'location / {', 
           `location / {
-        # Cloudflare Loop Protection:
-        # Se X-Forwarded-Proto != https (acesso direto inseguro), force redirect.
-        # Se == https (Cloudflare Flexible), continue para o proxy_pass abaixo.
         if ($http_x_forwarded_proto != "https") {
             return 301 https://$host$request_uri;
         }`
@@ -243,9 +259,7 @@ server {
     ssl_ciphers HIGH:!aNULL:!MD5;
     ssl_prefer_server_ciphers on;
     
-    # HSTS
     add_header Strict-Transport-Security "max-age=31536000" always;
-    
     client_max_body_size 100M;
 
     location /.well-known/acme-challenge/ {
@@ -265,27 +279,24 @@ server {
         allow all;
     }
 
-    # Bloco Híbrido (Redirecionamento Condicional + Proxy)
     ${httpLocationBlocks}
 }
 `;
   }
 
   public static async deleteCertificate(domain: string, systemPool: Pool): Promise<void> {
-      // Remover prefixo wildcard para achar a pasta correta
       const cleanDomain = domain.trim().toLowerCase().replace(/^\*\./, '');
       
       const targets = [
-          path.join(this.basePath, domain), // Tenta exato (para single domain)
-          path.join(this.basePath, `wildcard.${cleanDomain}`), // Tenta padrão interno
-          path.join(this.basePath, cleanDomain) // Tenta raiz do domínio (caso manual)
+          path.join(this.basePath, domain), 
+          path.join(this.basePath, `wildcard.${cleanDomain}`), 
+          path.join(this.basePath, cleanDomain) 
       ];
       
       let removed = false;
       for (const t of targets) {
           if (fs.existsSync(t)) {
               fs.rmSync(t, { recursive: true, force: true });
-              // Limpar renovação
               const renewal = path.join('/etc/letsencrypt/renewal', `${path.basename(t)}.conf`);
               if (fs.existsSync(renewal)) fs.unlinkSync(renewal);
               removed = true;
@@ -295,8 +306,7 @@ server {
       if (removed) {
           await this.rebuildNginxConfigs(systemPool);
       } else {
-          console.warn(`[CertService] Cert files for ${domain} not found, rebuilding config anyway.`);
-          await this.rebuildNginxConfigs(systemPool);
+          console.warn(`[CertService] Cert files for ${domain} not found.`);
       }
   }
 
@@ -306,16 +316,8 @@ server {
           const dirs = fs.readdirSync(this.basePath).filter(f => 
               fs.lstatSync(path.join(this.basePath, f)).isDirectory() && f !== 'system' && f !== 'README'
           );
-          // Normaliza nomes para display (wildcard.site.com -> *.site.com)
           return dirs.map(d => d.startsWith('wildcard.') ? d.replace('wildcard.', '*.') : d);
       } catch (e) { return []; }
-  }
-
-  public static async detectEnvironment(): Promise<any> {
-      const domains = await this.listAvailableCerts();
-      let hasCertbot = false;
-      try { if (fs.existsSync('/usr/bin/certbot') || fs.existsSync('/usr/local/bin/certbot')) hasCertbot = true; } catch(e) {}
-      return { provider: hasCertbot ? 'certbot' : 'manual', active: domains.length > 0, domains, message: `${domains.length} domínios no cofre.` };
   }
 
   public static async requestCertificate(
@@ -328,7 +330,6 @@ server {
   ): Promise<{ success: boolean, message: string }> {
     
     const isWildcard = domain.startsWith('*.');
-    // Salva wildcards sempre na pasta 'wildcard.domain.com' para padronização
     const fsName = isWildcard ? `wildcard.${domain.replace('*.', '')}` : domain; 
     
     if (provider === 'letsencrypt' && isWildcard) {
@@ -339,12 +340,10 @@ server {
     
     const domainDir = path.join(this.basePath, fsName);
     
-    // MANUAL / CLOUDFLARE PEM UPLOAD
     if (provider === 'manual' || provider === 'cloudflare_pem' as any) {
         if (!manualData?.cert || !manualData?.key) throw new Error("Cert/Key required.");
         if (!fs.existsSync(this.basePath)) fs.mkdirSync(this.basePath, { recursive: true });
         
-        // Remove anterior se existir para sobrescrever
         if (fs.existsSync(domainDir)) fs.rmSync(domainDir, { recursive: true, force: true });
         fs.mkdirSync(domainDir, { recursive: true });
         
@@ -356,7 +355,6 @@ server {
         return { success: true, message: "Certificado salvo no cofre." };
     }
 
-    // CERTBOT
     if (provider === 'certbot' || provider === 'letsencrypt' as any) {
         if (!email.includes('@')) throw new Error("Email inválido.");
         

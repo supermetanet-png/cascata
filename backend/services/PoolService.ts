@@ -1,5 +1,12 @@
+
 import pg from 'pg';
 const { Pool } = pg;
+
+export interface PoolConfig {
+  max?: number;
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+}
 
 /**
  * PoolService
@@ -12,12 +19,14 @@ export class PoolService {
   /**
    * Obtém um pool de conexão para um banco de dados específico.
    * Se o pool já existir, retorna a instância em cache.
-   * Se não, cria uma nova conexão.
+   * Se não, cria uma nova conexão com as configurações fornecidas.
    * 
    * @param dbName Nome do banco de dados do projeto (ex: cascata_proj_xyz)
+   * @param config Configurações opcionais de performance (max connections, timeout)
    */
-  public static get(dbName: string): pg.Pool {
+  public static get(dbName: string, config?: PoolConfig): pg.Pool {
     if (this.pools.has(dbName)) {
+      // TODO: Futuramente implementar lógica para recriar pool se a config mudar drasticamente
       return this.pools.get(dbName)!;
     }
 
@@ -32,16 +41,21 @@ export class PoolService {
        dbUrl = baseUrl.replace(/\/[^\/?]+(\?.*)?$/, `/${dbName}$1`);
     }
 
-    const pool = new Pool({
+    const poolConfig = {
       connectionString: dbUrl,
-      max: 15, // Limite de conexões simultâneas por projeto
-      idleTimeoutMillis: 120000, // Fecha conexões ociosas após 2 minutos
-      connectionTimeoutMillis: 5000, // Timeout para estabelecer conexão
-    });
+      max: config?.max || 15, // Default: 15 conexões
+      idleTimeoutMillis: config?.idleTimeoutMillis || 120000, // Default: 2 minutos
+      connectionTimeoutMillis: config?.connectionTimeoutMillis || 5000, // Default: 5s
+    };
+
+    console.log(`[PoolService] Initializing pool for ${dbName} (Max: ${poolConfig.max}, Idle: ${poolConfig.idleTimeoutMillis}ms)`);
+
+    const pool = new Pool(poolConfig);
 
     pool.on('error', (err) => {
       console.error(`[PoolService] Erro inesperado no banco ${dbName}:`, err.message);
-      // Opcional: Remover do cache se o erro for fatal
+      // Se o erro for fatal, removemos do cache para forçar reconexão na próxima chamada
+      this.pools.delete(dbName);
     });
 
     this.pools.set(dbName, pool);
@@ -55,7 +69,11 @@ export class PoolService {
   public static async close(dbName: string) {
     if (this.pools.has(dbName)) {
       console.log(`[PoolService] Closing pool for ${dbName}`);
-      await this.pools.get(dbName)?.end();
+      try {
+        await this.pools.get(dbName)?.end();
+      } catch (e) {
+        console.warn(`[PoolService] Error closing pool ${dbName}`, e);
+      }
       this.pools.delete(dbName);
     }
   }
