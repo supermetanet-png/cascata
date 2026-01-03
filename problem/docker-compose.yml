@@ -1,0 +1,183 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: cascata-nginx
+    ports:
+      - "${APP_HTTP_PORT:-80}:80"
+      - "${APP_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - acme_challenge:/var/www/html
+      - certs:/etc/letsencrypt
+      - nginx_dynamic:/etc/nginx/conf.d/dynamic
+    depends_on:
+      - backend_control
+      - backend_data
+      - frontend
+    networks:
+      - cascata_public
+      - cascata_app
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: always
+
+  nginx_controller:
+    build:
+      context: ./nginx-controller
+      dockerfile: Dockerfile
+    container_name: cascata-nginx-controller
+    environment:
+      - NGINX_CONTAINER_NAME=cascata-nginx
+      - INTERNAL_CTRL_SECRET=${INTERNAL_CTRL_SECRET:-fallback_secret}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - cascata_app
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: always
+
+  # Backend Control Plane
+  backend_control:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cascata-backend:latest
+    container_name: cascata-backend-control
+    environment:
+      - SERVICE_MODE=CONTROL_PLANE
+      - SYSTEM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}
+      - SYSTEM_JWT_SECRET=${SYSTEM_JWT_SECRET}
+      - INTERNAL_CTRL_SECRET=${INTERNAL_CTRL_SECRET:-fallback_secret}
+      - PORT=3000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - acme_challenge:/var/www/html
+      - certs:/etc/letsencrypt
+      - storage_data:/app/../storage
+      - nginx_dynamic:/etc/nginx/conf.d/dynamic
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nginx_controller:
+        condition: service_started
+    networks:
+      - cascata_app
+      - cascata_data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    restart: always
+
+  # Backend Data Plane
+  # CORREÇÃO CRÍTICA: Contexto de build adicionado para garantir que o Docker 
+  # construa a imagem localmente se ela não existir, evitando erro de pull.
+  backend_data:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    image: cascata-backend:latest
+    container_name: cascata-backend-data
+    environment:
+      - SERVICE_MODE=DATA_PLANE
+      - SYSTEM_DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}
+      - SYSTEM_JWT_SECRET=${SYSTEM_JWT_SECRET}
+      - PORT=3000
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - storage_data:/app/../storage
+    depends_on:
+      - db
+      - redis
+    networks:
+      - cascata_app
+      - cascata_data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    restart: always
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cascata-frontend
+    networks:
+      - cascata_public
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: always
+
+  db:
+    image: postgres:15-alpine
+    container_name: cascata-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-cascata_admin}
+      POSTGRES_PASSWORD: ${DB_PASS:-secure_pass}
+      POSTGRES_DB: ${DB_NAME:-cascata_system}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-cascata_admin} -d ${DB_NAME:-cascata_system}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cascata_data
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+  redis:
+    image: redis:7-alpine
+    container_name: cascata-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_storage:/data
+    networks:
+      - cascata_data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  cascata_public:
+    driver: bridge
+    name: cascata_public
+  cascata_app:
+    driver: bridge
+    name: cascata_app
+  cascata_data:
+    driver: bridge
+    name: cascata_data
+    internal: false
+
+volumes:
+  pgdata:
+  acme_challenge:
+  certs:
+  storage_data:
+  nginx_dynamic:
+  redis_storage:

@@ -1,0 +1,19 @@
+Com base na conversa detalhada no documento, os arquivos que foram modificados, corrigidos ou criados para implementar os aprimoramentos de segurança e infraestrutura são os seguintes:
+
+
+backend/server.ts: Este arquivo foi reescrito integralmente e modificado em várias etapas para incluir a lógica de limites dinâmicos de payload JSON , a integração com a nova função de limpeza de logs imutáveis e a implementação das proteções contra ataques de força bruta nas rotas de autenticação.(problem/server.ts)
+
+
+
+
+docker-compose.yml: Modificado para implementar a segmentação de rede Docker, criando as redes cascata_public, cascata_app e cascata_data para isolar os serviços de banco de dados e Redis do acesso direto pelo Nginx.(problem/docker-compose.yml)
+
+
+backend/services/RateLimitService.ts: Atualizado para incluir métodos específicos de gerenciamento de bloqueio (lockout), registro de falhas e limpeza de contadores de tentativas de login utilizando o Redis.(problem/009_immutable_logs.sql.txt)
+
+
+backend/migrations/009_immutable_logs.sql.txt: Novo arquivo criado para definir a estrutura de banco de dados (Triggers e Stored Procedures) que garante a imutabilidade dos logs de auditoria e permite apenas exclusões controladas via procedimento de manutenção.
+
+backend/tsconfig.json: Mencionado como corrigido para ajustar as flags de compilação, como alterar "noEmit" para false e remover conflitos que impediam a geração da pasta de distribuição.(problem/tsconfig.json)
+
+backend/Dockerfile.txt: Corrigido para incluir instruções de build explícitas, garantindo que as imagens fossem construídas localmente de forma correta e seguindo o sufixo de nomenclatura exigido pelos scripts de deploy.(problem/Dockerfile.txt)

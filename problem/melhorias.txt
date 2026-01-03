@@ -1,0 +1,62 @@
+Aqui está o levantamento detalhado dos 4 pontos de aprimoramento discutidos, focando na identificação dos problemas e na lógica das soluções propostas para garantir a robustez do sistema.
+
+1. Prevenção de Bloqueio de Event Loop e Vulnerabilidade ReDoS
+
+Problema Identificado: O uso de Node.js (que opera em thread única) tornava o sistema vulnerável a ataques de negação de serviço (DoS). Um payload JSON excessivamente grande ou uma expressão regular maliciosa (ReDoS) em um envio poderia travar a CPU para todos os usuários da instância, pois o processamento síncrono impediria o servidor de responder a qualquer outra requisição.
+
+
+
+Lógica da Solução: Implementação de limites dinâmicos e granulares para o tamanho do corpo (body) das requisições.
+
+
+Como foi corrigido: Em vez de um limite global único e alto, o sistema passou a identificar primeiro o projeto (via domínio ou identificador) para então aplicar limites específicos baseados nos metadados desse projeto. Foi estabelecido um "teto mestre" (Hard Cap) inviolável pelo sistema (ex: 50MB) para proteger a memória RAM, independentemente da configuração do usuário. Além disso, os limites foram segmentados por tipo de rota: limites menores para operações comuns de banco de dados e limites maiores para funções de borda (Edge Functions) que podem legitimamente processar mais dados.
+
+
+
+
+2. Segmentação de Rede Docker (Isolamento de Infraestrutura)
+
+Problema Identificado: Todos os serviços rodavam em uma rede única padrão ("default"). Isso significava que, se um atacante conseguisse comprometer o serviço de entrada (Nginx/Proxy), ele teria visibilidade direta e livre acesso para tentar atacar o Banco de Dados e o Redis, contornando as proteções do Backend.
+
+
+
+
+Lógica da Solução: Aplicação do princípio de "Defesa em Profundidade" através da criação de redes segregadas.
+
+
+
+
+
+Como foi corrigido: A infraestrutura foi dividida em três zonas de segurança:
+
+
+
+
+Zona Pública: Contém apenas o Proxy (Nginx) e o Frontend, sendo a única exposta à internet.
+
+
+Zona de Aplicação: Onde o Proxy se comunica exclusivamente com os serviços de Backend.
+
+
+
+Zona de Dados (O "Cofre"): Rede isolada contendo o Banco de Dados e o Redis, acessível apenas pelos serviços de Backend. O Proxy nunca consegue "enxergar" ou falar diretamente com o banco de dados, garantindo que mesmo uma falha no perímetro não exponha o núcleo de dados.
+
+
+
+
+3. Proteção Inteligente contra Força Bruta (Smart Lockout)
+
+Problema Identificado: Embora houvesse um limite de taxa (Rate Limit) global, faltava uma proteção específica por conta de usuário ou IP nas rotas de autenticação. Um invasor poderia tentar adivinhar senhas de forma lenta e direcionada a um e-mail específico, sem nunca disparar os bloqueios globais de tráfego.
+
+
+
+
+
+Lógica da Solução: Sistema de bloqueio temporário (Lockout) utilizando armazenamento em cache rápido (Redis) para rastrear tentativas falhas.
+
+
+
+
+
+
+Como foi corrigido: Foi implementado um serviço que monitora tentativas consecutivas de login antes mesmo de processar a senha. A lógica permite estratégias de bloqueio por IP, por E-mail ou de forma híbrida. Ao atingir um limite (ex: 5 falhas), o acesso para aquele alvo é bloqueado por um período determinado (ex: 15 minutos), usando chaves atômicas no Redis que expiram automaticamente. Sucessos na autenticação limpam imediatamente o contador de falhas, evitando bloqueios indevidos para usuários legítimos que apenas erraram a senha momentaneamente.
