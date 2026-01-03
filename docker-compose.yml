@@ -15,6 +15,9 @@ services:
       - backend_control
       - backend_data
       - frontend
+    networks:
+      - cascata_public
+      - cascata_app
     restart: always
 
   # NOVO: Sidecar de Segurança
@@ -29,6 +32,8 @@ services:
       - INTERNAL_CTRL_SECRET=${INTERNAL_CTRL_SECRET:-fallback_secret}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - cascata_app
     restart: always
 
   backend_control:
@@ -57,6 +62,9 @@ services:
         condition: service_healthy
       nginx_controller:
         condition: service_started
+    networks:
+      - cascata_app
+      - cascata_data
     restart: always
 
   backend_data:
@@ -78,6 +86,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - cascata_app
+      - cascata_data
     restart: always
 
   frontend:
@@ -85,6 +96,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: cascata-frontend
+    networks:
+      - cascata_public
     restart: always
 
   db:
@@ -103,6 +116,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - cascata_data
 
   redis:
     image: redis:7-alpine
@@ -116,6 +131,17 @@ services:
       retries: 5
     volumes:
       - redis_storage:/data
+    networks:
+      - cascata_data
+
+networks:
+  cascata_public:
+    driver: bridge
+  cascata_app:
+    driver: bridge
+  cascata_data:
+    driver: bridge
+    internal: true
 
 volumes:
   pgdata:

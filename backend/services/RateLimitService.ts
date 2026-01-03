@@ -1,3 +1,4 @@
+
 import { Redis } from 'ioredis';
 import { Pool } from 'pg';
 
@@ -21,10 +22,16 @@ interface RateCheckResult {
     customMessage?: string;
 }
 
+export interface AuthSecurityConfig {
+    max_attempts: number;      // Default: 5
+    lockout_minutes: number;   // Default: 15
+    strategy: 'ip' | 'email' | 'hybrid'; // Default: 'hybrid'
+}
+
 /**
  * RateLimitService
  * Implementa o algoritmo "Token Bucket" ou "Fixed Window" via Redis para controle de tráfego.
- * Também gerencia o "Panic Mode", um kill-switch global para bloquear tráfego externo em emergências.
+ * Também gerencia o "Panic Mode" e proteção contra Força Bruta.
  */
 export class RateLimitService {
     private static redis: Redis | null = null;
@@ -42,7 +49,7 @@ export class RateLimitService {
                 lazyConnect: true 
             });
             
-            this.redis.connect().catch(e => console.warn("[RateLimit] Initial Redis connect failed (will retry):", e.message));
+            this.redis.connect().catch((e: any) => console.warn("[RateLimit] Initial Redis connect failed (will retry):", e.message));
 
             this.redis.on('error', (err) => {
                 this.isRedisHealthy = false;
@@ -88,6 +95,105 @@ export class RateLimitService {
             console.error("Redis Panic Set Error", e);
         }
     }
+
+    // --- BRUTE FORCE PROTECTION (SMART LOCKOUT) ---
+
+    private static getLockoutKeys(slug: string, ip: string, email?: string, strategy: 'ip' | 'email' | 'hybrid' = 'hybrid'): string[] {
+        const keys: string[] = [];
+        if (strategy === 'ip' || strategy === 'hybrid') {
+            keys.push(`auth:lock:${slug}:ip:${ip}`);
+        }
+        if ((strategy === 'email' || strategy === 'hybrid') && email) {
+            keys.push(`auth:lock:${slug}:email:${email.toLowerCase().trim()}`);
+        }
+        return keys;
+    }
+
+    private static getCounterKeys(slug: string, ip: string, email?: string, strategy: 'ip' | 'email' | 'hybrid' = 'hybrid'): string[] {
+        const keys: string[] = [];
+        if (strategy === 'ip' || strategy === 'hybrid') {
+            keys.push(`auth:fail:${slug}:ip:${ip}`);
+        }
+        if ((strategy === 'email' || strategy === 'hybrid') && email) {
+            keys.push(`auth:fail:${slug}:email:${email.toLowerCase().trim()}`);
+        }
+        return keys;
+    }
+
+    /**
+     * Verifica se o usuário/IP está bloqueado antes de tentar login.
+     */
+    public static async checkAuthLockout(
+        slug: string, 
+        ip: string, 
+        email?: string, 
+        config: AuthSecurityConfig = { max_attempts: 5, lockout_minutes: 15, strategy: 'hybrid' }
+    ): Promise<{ locked: boolean, reason?: string }> {
+        if (!this.redis || !this.isRedisHealthy) return { locked: false };
+
+        const lockKeys = this.getLockoutKeys(slug, ip, email, config.strategy);
+        
+        for (const key of lockKeys) {
+            const isLocked = await this.redis.exists(key);
+            if (isLocked) {
+                return { locked: true, reason: 'Muitas tentativas falhas. Tente novamente em alguns minutos.' };
+            }
+        }
+        return { locked: false };
+    }
+
+    /**
+     * Registra uma falha de autenticação. Se exceder o limite, cria o bloqueio.
+     */
+    public static async registerAuthFailure(
+        slug: string,
+        ip: string,
+        email?: string,
+        config: AuthSecurityConfig = { max_attempts: 5, lockout_minutes: 15, strategy: 'hybrid' }
+    ): Promise<void> {
+        if (!this.redis || !this.isRedisHealthy) return;
+
+        const counterKeys = this.getCounterKeys(slug, ip, email, config.strategy);
+        const lockoutDurationSeconds = config.lockout_minutes * 60;
+        const failureWindowSeconds = 3600; // 1 hora para acumular falhas
+
+        for (const key of counterKeys) {
+            const current = await this.redis.incr(key);
+            
+            // Define TTL na primeira falha
+            if (current === 1) {
+                await this.redis.expire(key, failureWindowSeconds);
+            }
+
+            if (current >= config.max_attempts) {
+                // LOCKOUT TRIGGERED
+                const lockKey = key.replace('auth:fail:', 'auth:lock:');
+                await this.redis.set(lockKey, 'locked', 'EX', lockoutDurationSeconds);
+                // Limpa o contador para reiniciar ciclo após lockout acabar
+                await this.redis.del(key);
+            }
+        }
+    }
+
+    /**
+     * Limpa contadores de falha após um login bem-sucedido.
+     */
+    public static async clearAuthFailure(
+        slug: string, 
+        ip: string, 
+        email?: string
+    ): Promise<void> {
+        if (!this.redis || !this.isRedisHealthy) return;
+        
+        const keys = [
+            `auth:fail:${slug}:ip:${ip}`,
+            email ? `auth:fail:${slug}:email:${email.toLowerCase().trim()}` : null
+        ].filter(Boolean) as string[];
+
+        if (keys.length > 0) await this.redis.del(...keys);
+    }
+
+    // --- STANDARD API RATE LIMIT ---
 
     /**
      * Carrega regras customizadas do banco de dados (systemPool) para a memória.

@@ -6,7 +6,7 @@ import {
   UserPlus, CreditCard, Hash, Settings, Eye, EyeOff, Lock, Ban, 
   Filter, ChevronLeft, ChevronRight, CheckSquare, Square, Link,
   Clock, Zap, Github, Facebook, Twitter, Edit2, Unlink, Layers,
-  RefreshCcw, ArrowRight, LayoutTemplate, Send
+  RefreshCcw, ArrowRight, LayoutTemplate, Send, ShieldAlert, Target
 } from 'lucide-react';
 
 const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
@@ -41,6 +41,13 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
   const [strategyConfig, setStrategyConfig] = useState<any>(null); 
   const [editingStrategyName, setEditingStrategyName] = useState(''); 
   const [showConfigModal, setShowConfigModal] = useState(false);
+
+  // SECURITY / SMART LOCKOUT STATE
+  const [securityConfig, setSecurityConfig] = useState({
+      max_attempts: 5,
+      lockout_minutes: 15,
+      strategy: 'hybrid' // 'ip' | 'email' | 'hybrid'
+  });
   
   // PROVIDER CONFIG
   const [providerConfig, setProviderConfig] = useState<any>({ client_id: '', client_secret: '' });
@@ -106,6 +113,14 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
       setProjectDomain(currentProj?.custom_domain || '');
       setSiteUrl(currentProj?.metadata?.auth_config?.site_url || '');
       
+      // Load Security Config
+      const sec = currentProj?.metadata?.auth_config?.security || {};
+      setSecurityConfig({
+          max_attempts: sec.max_attempts || 5,
+          lockout_minutes: sec.lockout_minutes || 15,
+          strategy: sec.strategy || 'hybrid'
+      });
+
       // Load Global Origins
       const rawOrigins = currentProj?.metadata?.allowed_origins || [];
       setGlobalOrigins(rawOrigins.map((o: any) => typeof o === 'string' ? o : o.url));
@@ -194,14 +209,24 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
         
         let finalAuthConfig = currentMetadata.auth_config || {};
         if (authConfig) {
-            // Se site_url vier no authConfig, atualiza.
+            // Merge scalar values
             if (authConfig.site_url !== undefined) finalAuthConfig.site_url = authConfig.site_url;
             
             // Merge providers
-            finalAuthConfig.providers = {
-                ...(finalAuthConfig.providers || {}),
-                ...(authConfig.providers || {})
-            };
+            if (authConfig.providers) {
+                finalAuthConfig.providers = {
+                    ...(finalAuthConfig.providers || {}),
+                    ...(authConfig.providers || {})
+                };
+            }
+
+            // Merge security
+            if (authConfig.security) {
+                finalAuthConfig.security = {
+                    ...(finalAuthConfig.security || {}),
+                    ...(authConfig.security || {})
+                };
+            }
             
             body.authConfig = finalAuthConfig;
         }
@@ -242,6 +267,10 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
 
   const handleSaveSiteUrl = () => {
       saveStrategies(strategies, { site_url: siteUrl });
+  };
+
+  const handleSaveSecurity = () => {
+      saveStrategies(strategies, { security: securityConfig });
   };
 
   const openProviderConfig = async (provider: string) => {
@@ -433,6 +462,8 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
 
   const isOauth = (s: string) => ['google', 'github', 'facebook', 'twitter'].includes(s);
 
+  const isAggressiveSecurity = securityConfig.max_attempts < 3 || securityConfig.lockout_minutes > 60;
+
   return (
     <div className="flex h-full flex-col bg-[#F8FAFC]">
       {(error || success) && (
@@ -566,6 +597,89 @@ const AuthConfig: React.FC<{ projectId: string }> = ({ projectId }) => {
                     </div>
                     <p className="text-[10px] text-slate-400 px-2 font-medium">Usado quando nenhum <code>redirect_to</code> é fornecido no fluxo OAuth ou Magic Link.</p>
                 </div>
+             </div>
+             
+             {/* SECURITY & PROTECTION (NEW) */}
+             <div className="bg-white border border-slate-200 rounded-[3rem] p-12 shadow-sm">
+                <div className="flex items-center gap-4 mb-8">
+                   <div className="w-12 h-12 bg-rose-50 text-rose-600 rounded-2xl flex items-center justify-center"><ShieldAlert size={20}/></div>
+                   <div>
+                      <h3 className="text-2xl font-black text-slate-900 tracking-tight">Smart Lockout</h3>
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Brute Force Protection</p>
+                   </div>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Max Attempts (Threshold)</label>
+                        <div className="flex items-center bg-slate-50 border border-slate-200 rounded-2xl px-4">
+                            <Target size={16} className="text-rose-400" />
+                            <input 
+                                type="number"
+                                min="1"
+                                value={securityConfig.max_attempts} 
+                                onChange={(e) => setSecurityConfig({...securityConfig, max_attempts: parseInt(e.target.value)})} 
+                                className="w-full bg-transparent border-none py-3 px-4 text-sm font-bold text-slate-900 outline-none" 
+                            />
+                        </div>
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Lockout Duration (Minutes)</label>
+                        <div className="flex items-center bg-slate-50 border border-slate-200 rounded-2xl px-4">
+                            <Clock size={16} className="text-indigo-400" />
+                            <input 
+                                type="number"
+                                min="1"
+                                value={securityConfig.lockout_minutes} 
+                                onChange={(e) => setSecurityConfig({...securityConfig, lockout_minutes: parseInt(e.target.value)})} 
+                                className="w-full bg-transparent border-none py-3 px-4 text-sm font-bold text-slate-900 outline-none" 
+                            />
+                        </div>
+                    </div>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Protection Strategy</label>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <button 
+                            onClick={() => setSecurityConfig({...securityConfig, strategy: 'hybrid'})}
+                            className={`p-4 rounded-2xl border text-left transition-all ${securityConfig.strategy === 'hybrid' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-300'}`}
+                        >
+                            <span className="text-xs font-black uppercase block mb-1">Hybrid (Best)</span>
+                            <span className={`text-[10px] ${securityConfig.strategy === 'hybrid' ? 'text-indigo-200' : 'text-slate-400'}`}>Locks IP + Email pair. Safest for offices/NAT.</span>
+                        </button>
+                        <button 
+                            onClick={() => setSecurityConfig({...securityConfig, strategy: 'ip'})}
+                            className={`p-4 rounded-2xl border text-left transition-all ${securityConfig.strategy === 'ip' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-300'}`}
+                        >
+                            <span className="text-xs font-black uppercase block mb-1">Strict IP</span>
+                            <span className={`text-[10px] ${securityConfig.strategy === 'ip' ? 'text-indigo-200' : 'text-slate-400'}`}>Locks IP address entirely. Good vs Bots.</span>
+                        </button>
+                        <button 
+                            onClick={() => setSecurityConfig({...securityConfig, strategy: 'email'})}
+                            className={`p-4 rounded-2xl border text-left transition-all ${securityConfig.strategy === 'email' ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg' : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-300'}`}
+                        >
+                            <span className="text-xs font-black uppercase block mb-1">Email Only</span>
+                            <span className={`text-[10px] ${securityConfig.strategy === 'email' ? 'text-indigo-200' : 'text-slate-400'}`}>Protects specific account. Vulnerable to distributed attacks.</span>
+                        </button>
+                    </div>
+                </div>
+
+                {isAggressiveSecurity && (
+                    <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-3 mb-6 animate-in fade-in slide-in-from-top-2">
+                        <AlertCircle className="text-amber-600 shrink-0 mt-0.5" size={18}/>
+                        <div>
+                            <h4 className="text-xs font-black text-amber-700 uppercase">Atenção: Configuração Agressiva</h4>
+                            <p className="text-[10px] text-amber-600 mt-1 leading-relaxed">
+                                Você definiu um limite muito baixo de tentativas ou um tempo de bloqueio muito longo. Isso pode causar bloqueios acidentais de administradores ou usuários legítimos. Certifique-se de que o fluxo de "Esqueci minha senha" está funcional.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                <button onClick={handleSaveSecurity} disabled={executing} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl hover:bg-indigo-600 transition-all flex items-center justify-center gap-2">
+                    {executing ? <Loader2 className="animate-spin" size={14}/> : 'Aplicar Políticas de Segurança'}
+                </button>
              </div>
 
              {/* SCHEMA CONCATENATION */}

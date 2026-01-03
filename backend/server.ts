@@ -1,3 +1,4 @@
+
 import express, { Request, RequestHandler, NextFunction } from 'express';
 import pg from 'pg';
 import jwt from 'jsonwebtoken';
@@ -17,7 +18,7 @@ import { DatabaseService } from './services/DatabaseService.js';
 import { AuthService } from './services/AuthService.js';
 import { WebhookService } from './services/WebhookService.js';
 import { PoolService } from './services/PoolService.js';
-import { RateLimitService } from './services/RateLimitService.js';
+import { RateLimitService, AuthSecurityConfig } from './services/RateLimitService.js';
 import { CertificateService } from './services/CertificateService.js';
 import { MigrationService } from './services/MigrationService.js';
 import { EdgeService } from './services/EdgeService.js';
@@ -48,11 +49,8 @@ interface CascataRequest extends Request {
 
 const app = express();
 
-// Global JSON/UrlEncoded Config
-app.use(express.json({ limit: '100mb' }) as any);
-app.use(express.urlencoded({ extended: true }) as any);
-
 // --- SECURITY: HARDENING HEADERS ---
+// Aplicado antes de tudo para garantir resposta segura até em erros 4xx
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -166,13 +164,21 @@ const validateMagicBytes = (filePath: string, ext: string): boolean => {
 };
 
 const parseBytes = (sizeStr: string): number => {
-  if (!sizeStr) return 10 * 1024 * 1024; 
+  if (!sizeStr) return 2 * 1024 * 1024; // 2MB Default Fallback
   const match = sizeStr.toString().match(/^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?$/);
   if (!match) return parseInt(sizeStr) || 0;
   const num = parseFloat(match[1]);
   const unit = (match[2] || 'B').toUpperCase();
   const multipliers: Record<string, number> = { 'B': 1, 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 * 1024 * 1024 };
   return Math.floor(num * (multipliers[unit] || 1));
+};
+
+const formatBytes = (bytes: number) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
 const walk = (dir: string, rootPath: string, fileList: any[] = []) => {
@@ -207,8 +213,6 @@ const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     
-    // CORRECTION: Added 'x-supabase-api-version' to allowed headers list.
-    // This fixes the "Request header field x-supabase-api-version is not allowed" error.
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-cascata-client,Prefer,Range,x-client-info,x-supabase-auth,content-profile,accept-profile,x-supabase-api-version,x-cascata-signature,x-cascata-event');
     
     // Expose headers for PostgREST pagination
@@ -237,8 +241,6 @@ const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
         // Strict Mode: Check Whitelist
         if (origin && safeOrigins.includes(origin)) {
             res.setHeader('Access-Control-Allow-Origin', origin);
-        } else {
-            // Blocked origin: Don't set header (Browser will block)
         }
     }
 
@@ -275,8 +277,6 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
     let resolutionMethod = 'unknown';
 
     // FIX: Using explicit parameter order and type casting for pgp_sym_decrypt.
-    // $1 = SYS_SECRET (used in Select list) ::text to be safe
-    // $2 = Dynamic identifier (used in Where clause)
     const projectQuery = `
         SELECT 
             id, name, slug, db_name, custom_domain, ssl_certificate_source, blocklist, metadata, status,
@@ -287,13 +287,11 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
     `;
 
     if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
-      // PARAM ORDER: [SECRET, HOST]
       projectResult = await systemPool.query(`${projectQuery} WHERE custom_domain = $2`, [SYS_SECRET, host]);
       if ((projectResult.rowCount ?? 0) > 0) resolutionMethod = 'domain';
     }
 
     if ((!projectResult || (projectResult.rowCount ?? 0) === 0) && slugFromUrl) {
-      // PARAM ORDER: [SECRET, SLUG]
       projectResult = await systemPool.query(`${projectQuery} WHERE slug = $2`, [SYS_SECRET, slugFromUrl]);
       if ((projectResult.rowCount ?? 0) > 0) resolutionMethod = 'slug';
     }
@@ -328,7 +326,6 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
       }
     }
 
-    // Rewrite URL if accessing via Custom Domain so the Express Router can match /api/data/:slug
     if (resolutionMethod === 'domain' && !req.url.startsWith('/api/data/')) {
       req.url = `/api/data/${project.slug}${req.url}`;
     }
@@ -361,9 +358,7 @@ const resolveProject: RequestHandler = async (req: any, res: any, next: any) => 
 };
 
 const hostGuard: RequestHandler = async (req: any, res: any, next: any) => {
-    // SECURITY: Se o projeto foi resolvido (por domínio customizado ou slug), PULA o guard.
     if (req.project) return next();
-    
     if (req.path === '/' || req.path === '/health') return next();
 
     try {
@@ -417,6 +412,41 @@ const controlPlaneFirewall: RequestHandler = async (req: any, res: any, next: an
     }
   }
   next();
+};
+
+// --- DYNAMIC BODY PARSER (HARDENING) ---
+// Substitui o middleware global express.json() para evitar DoS e "Noisy Neighbor"
+const dynamicBodyParser: RequestHandler = (req, res, next) => {
+    // SYSTEM HARD CAP: 50MB (Proteção mestre da infra)
+    const SYSTEM_HARD_CAP_BYTES = 50 * 1024 * 1024; 
+    
+    let limitStr = '2mb'; // Default Conservador
+
+    const proj = (req as any).project;
+    if (proj?.metadata?.security?.max_json_size) {
+        limitStr = proj.metadata.security.max_json_size;
+    } 
+    // Defaults inteligentes baseados no tipo de rota
+    else if (req.path.includes('/edge/')) {
+        limitStr = '10mb'; // Edge functions precisam de mais payload
+    } else if (req.path.includes('/import/')) {
+        limitStr = '10mb'; // Manifestos de importação
+    }
+
+    const requestedBytes = parseBytes(limitStr);
+    const safeLimit = Math.min(requestedBytes, SYSTEM_HARD_CAP_BYTES);
+
+    // Aplica o parser
+    express.json({ limit: safeLimit })(req, res, (err) => {
+        if (err) {
+            return res.status(413).json({
+                error: 'Payload Too Large',
+                message: `Request body exceeds the limit of ${formatBytes(safeLimit)}`,
+                code: 'PAYLOAD_TOO_LARGE'
+            });
+        }
+        express.urlencoded({ extended: true, limit: safeLimit })(req, res, next);
+    });
 };
 
 const dynamicRateLimiter: RequestHandler = async (req: any, res: any, next: any) => {
@@ -511,7 +541,6 @@ const cascataAuth: RequestHandler = async (req: any, res: any, next: any) => {
   }
 
   // --- ALLOW PUBLIC ROUTES ---
-  // Ensure authorize and callback are accessible without strict JWT (they handle their own logic)
   if (
       req.path.includes('/auth/providers/') || 
       req.path.includes('/auth/callback') || 
@@ -559,8 +588,8 @@ const detectSemanticAction = (method: string, path: string): string | null => {
     if (path.includes('/auth/token') && !path.includes('refresh')) return 'AUTH_LOGIN';
     if (path.includes('/auth/token/refresh')) return 'AUTH_REFRESH';
     if (path.includes('/auth/callback')) return 'AUTH_CALLBACK'; 
-    if (path.includes('/auth/challenge')) return 'AUTH_CHALLENGE'; 
-    if (path.includes('/auth/verify-challenge')) return 'AUTH_VERIFY';
+    if (path.includes('/auth/passwordless/start')) return 'AUTH_OTP_REQUEST'; 
+    if (path.includes('/auth/passwordless/verify')) return 'AUTH_OTP_VERIFY'; 
     if (path.includes('/auth/users') && method === 'POST') return 'AUTH_REGISTER';
     if (path.includes('/storage') && method === 'POST' && path.includes('/upload')) return 'UPLOAD_FILE';
     if (path.includes('/storage') && method === 'DELETE') return 'DELETE_FILE';
@@ -682,13 +711,14 @@ const waitForDatabase = async (retries = 30, delay = 1000): Promise<boolean> => 
 };
 
 // APPLY MIDDLEWARES (CORRECTED ORDER FOR DOMAIN RESOLUTION & LOCKING)
-app.use(dynamicCors as any);    // FIRST: Apply CORS policies (handles OPTIONS responses globally)
-app.use(resolveProject as any); // SECOND: Resolve project via Host/Domain
-app.use(hostGuard as any);      // THIRD: Guard non-project hosts (Admin Panel). Returns 404 for unknown hosts.
-app.use(controlPlaneFirewall as any);
-app.use(dynamicRateLimiter as any); 
-app.use(auditLogger as any); 
-app.use(cascataAuth as any);
+app.use(dynamicCors as any);    // 1. CORS Preflight
+app.use(resolveProject as any); // 2. Identify Project
+app.use(hostGuard as any);      // 3. Block unknown hostnames
+app.use(controlPlaneFirewall as any); // 4. Protect Control Plane
+app.use(dynamicBodyParser as any);    // 5. Intelligent Body Parsing (Hard Cap + Project Config)
+app.use(dynamicRateLimiter as any);   // 6. Rate Limit
+app.use(auditLogger as any);          // 7. Audit
+app.use(cascataAuth as any);          // 8. Auth/Role Resolution
 
 // Health Check
 app.get('/', (req, res) => { res.send('Cascata Engine OK'); });
@@ -1131,19 +1161,60 @@ app.delete('/api/data/:slug/auth/users/:id', async (req: any, res: any, next: Ne
     try { await r.projectPool!.query('DELETE FROM auth.users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (e: any) { next(e); }
 });
 
+// --- BRUTE FORCE PROTECTION WRAPPER ---
+// Helper to extract Auth Security Config from project metadata
+const getAuthSecurityConfig = (req: CascataRequest): AuthSecurityConfig => {
+    const meta = req.project?.metadata?.auth_config?.security || {};
+    return {
+        max_attempts: meta.max_attempts || 5,
+        lockout_minutes: meta.lockout_minutes || 15,
+        strategy: meta.strategy || 'hybrid'
+    };
+};
+
 // LEGACY AUTH (Used by Dashboard)
 app.post('/api/data/:slug/auth/token', async (req: any, res: any, next: NextFunction) => {
     const r = req as CascataRequest;
     const { provider, identifier, password } = req.body;
+    
+    // 1. IP & Email for Lockout Check
+    const forwarded = req.headers['x-forwarded-for'];
+    const realIp = req.headers['x-real-ip'];
+    const socketIp = req.socket?.remoteAddress;
+    let clientIp = (realIp as string) || (forwarded ? (forwarded as string).split(',')[0].trim() : socketIp) || '';
+    clientIp = clientIp.replace('::ffff:', '');
+    
+    const secConfig = getAuthSecurityConfig(r);
+
     try {
+        // 2. CHECK LOCKOUT
+        const lockout = await RateLimitService.checkAuthLockout(r.project.slug, clientIp, identifier, secConfig);
+        if (lockout.locked) {
+            return res.status(429).json({ error: lockout.reason });
+        }
+
         const idRes = await r.projectPool!.query('SELECT * FROM auth.identities WHERE provider = $1 AND identifier = $2', [provider, identifier]);
-        if (!idRes.rows[0]) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!idRes.rows[0]) {
+            // Register Failure (Invalid User)
+            await RateLimitService.registerAuthFailure(r.project.slug, clientIp, identifier, secConfig);
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
         const storedHash = idRes.rows[0].password_hash;
         let isValid = false;
         if (!storedHash.startsWith('$2')) {
             if (storedHash === password) { isValid = true; await r.projectPool!.query('UPDATE auth.identities SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(password, 10), idRes.rows[0].id]); }
         } else { isValid = await bcrypt.compare(password, storedHash); }
-        if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+        
+        if (!isValid) {
+            // Register Failure (Bad Password)
+            await RateLimitService.registerAuthFailure(r.project.slug, clientIp, identifier, secConfig);
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+        
+        // Success: Clear Failures
+        await RateLimitService.clearAuthFailure(r.project.slug, clientIp, identifier);
+
         const session = await AuthService.createSession(idRes.rows[0].user_id, r.projectPool!, r.project.jwt_secret);
         res.json(session);
     } catch (e: any) { next(e); }
@@ -1256,18 +1327,47 @@ app.post('/api/data/:slug/auth/v1/signup', async (req: any, res: any, next: Next
     }
 });
 
-// 2. Token (Login / Refresh)
+// 2. Token (Login / Refresh) with BRUTE FORCE PROTECTION
 app.post('/api/data/:slug/auth/v1/token', async (req: any, res: any, next: NextFunction) => {
     const r = req as CascataRequest;
+    
+    // IP extraction for Brute Force
+    const forwarded = req.headers['x-forwarded-for'];
+    const realIp = req.headers['x-real-ip'];
+    const socketIp = req.socket?.remoteAddress;
+    let clientIp = (realIp as string) || (forwarded ? (forwarded as string).split(',')[0].trim() : socketIp) || '';
+    clientIp = clientIp.replace('::ffff:', '');
+    
+    const email = req.body.email;
+    const secConfig = getAuthSecurityConfig(r);
+
     try {
+        // Only enforce lockout on password grants
+        if (req.body.grant_type === 'password') {
+            const lockout = await RateLimitService.checkAuthLockout(r.project.slug, clientIp, email, secConfig);
+            if (lockout.locked) {
+                return res.status(429).json({ error: lockout.reason, error_description: lockout.reason });
+            }
+        }
+
         const response = await GoTrueService.handleToken(
             r.projectPool!, 
             req.body, 
             r.project.jwt_secret,
             r.project.metadata || {} // Pass metadata as projectConfig
         );
+        
+        // Success: Clear Failures
+        if (req.body.grant_type === 'password') {
+            await RateLimitService.clearAuthFailure(r.project.slug, clientIp, email);
+        }
+
         res.json(response);
     } catch(e: any) {
+        // Failure: Register Attempt
+        if (req.body.grant_type === 'password') {
+            await RateLimitService.registerAuthFailure(r.project.slug, clientIp, email, secConfig);
+        }
         next(e);
     }
 });
@@ -1775,12 +1875,36 @@ app.get('/api/control/projects', async (req: any, res: any, next: NextFunction) 
 
 app.post('/api/control/projects/:slug/reveal-key', async (req: any, res: any, next: NextFunction) => {
     const { password, keyType } = req.body;
+    
+    // IP extraction for Lockout Check (Control Plane)
+    const forwarded = req.headers['x-forwarded-for'];
+    const realIp = req.headers['x-real-ip'];
+    const socketIp = req.socket.remoteAddress;
+    let clientIp = (realIp as string) || (forwarded ? (forwarded as string).split(',')[0].trim() : socketIp) || '';
+    clientIp = clientIp.replace('::ffff:', '');
+
+    const adminSecConfig = { max_attempts: 5, lockout_minutes: 15, strategy: 'hybrid' as const };
+
     try {
+        // Check Lockout
+        const lockout = await RateLimitService.checkAuthLockout('admin_control_plane_reveal', clientIp, undefined, adminSecConfig);
+        if (lockout.locked) {
+            return res.status(429).json({ error: lockout.reason });
+        }
+
         const admin = (await systemPool.query('SELECT * FROM system.admin_users LIMIT 1')).rows[0];
         let isValid = false;
         if (!admin.password_hash.startsWith('$2')) isValid = admin.password_hash === password;
         else isValid = await bcrypt.compare(password, admin.password_hash);
-        if (!isValid) return res.status(403).json({ error: "Invalid Password" });
+        
+        if (!isValid) {
+            await RateLimitService.registerAuthFailure('admin_control_plane_reveal', clientIp, undefined, adminSecConfig);
+            return res.status(403).json({ error: "Invalid Password" });
+        }
+
+        // Success
+        await RateLimitService.clearAuthFailure('admin_control_plane_reveal', clientIp);
+
         const keyRes = await systemPool.query(`SELECT pgp_sym_decrypt(${keyType}::bytea, $2) as decrypted_key FROM system.projects WHERE slug = $1`, [req.params.slug, SYS_SECRET]);
         res.json({ key: keyRes.rows[0].decrypted_key });
     } catch (e: any) { next(e); }
@@ -1940,13 +2064,49 @@ app.get('/api/control/me/ip', (req: any, res: any) => {
 // --- CONTROL PLANE: AUTH ---
 app.post('/api/control/auth/login', async (req: any, res: any, next: NextFunction) => {
   const { email, password } = req.body;
+  
+  // 1. IP extraction for Lockout Check (Control Plane)
+  const forwarded = req.headers['x-forwarded-for'];
+  const realIp = req.headers['x-real-ip'];
+  const socketIp = req.socket.remoteAddress;
+  let clientIp = (realIp as string) || (forwarded ? (forwarded as string).split(',')[0].trim() : socketIp) || '';
+  clientIp = clientIp.replace('::ffff:', '');
+
+  // Hardcoded stricter config for admin panel
+  const adminSecConfig = { max_attempts: 5, lockout_minutes: 15, strategy: 'hybrid' as const };
+
   try {
+    // 2. Check Lockout
+    const lockout = await RateLimitService.checkAuthLockout('admin_control_plane', clientIp, email, adminSecConfig);
+    if (lockout.locked) {
+        return res.status(429).json({ error: lockout.reason });
+    }
+
     const user = (await systemPool.query('SELECT * FROM system.admin_users WHERE email = $1', [email])).rows[0];
-    if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!user) {
+        await RateLimitService.registerAuthFailure('admin_control_plane', clientIp, email, adminSecConfig);
+        return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
     let isValid = false;
-    if (!user.password_hash.startsWith('$2')) { if (user.password_hash === password) { await systemPool.query('UPDATE system.admin_users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(password, 10), user.id]); isValid = true; } }
-    else isValid = await bcrypt.compare(password, user.password_hash);
-    if (!isValid) return res.status(401).json({ error: 'Credenciais inválidas' });
+    if (!user.password_hash.startsWith('$2')) { 
+        if (user.password_hash === password) { 
+            await systemPool.query('UPDATE system.admin_users SET password_hash = $1 WHERE id = $2', [await bcrypt.hash(password, 10), user.id]); 
+            isValid = true; 
+        } 
+    }
+    else { 
+        isValid = await bcrypt.compare(password, user.password_hash); 
+    }
+
+    if (!isValid) {
+        await RateLimitService.registerAuthFailure('admin_control_plane', clientIp, email, adminSecConfig);
+        return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    // Success: Clear Failures
+    await RateLimitService.clearAuthFailure('admin_control_plane', clientIp, email);
+
     res.json({ token: jwt.sign({ sub: user.id, role: 'superadmin' }, process.env.SYSTEM_JWT_SECRET!, { expiresIn: '12h' }) });
   } catch (e: any) { next(e); }
 });
@@ -2026,8 +2186,13 @@ app.post('/api/control/projects/:slug/webhooks', async (req: any, res: any, next
   try { await systemPool.query('INSERT INTO system.webhooks (project_slug, target_url, event_type, table_name) VALUES ($1, $2, $3, $4)', [req.params.slug, req.body.target_url, req.body.event_type, req.body.table_name]); res.json({ success: true }); } catch (e: any) { next(e); }
 });
 
+// NEW SECURE LOG DELETION
 app.delete('/api/control/projects/:slug/logs', async (req: any, res: any, next: NextFunction) => {
-  try { await systemPool.query(`DELETE FROM system.api_logs WHERE project_slug = $1 AND created_at < now() - interval '${Number(req.query.days)} days'`, [req.params.slug]); res.json({ success: true }); } catch (e: any) { next(e); }
+  try { 
+      // Calls the secure stored procedure that bypasses the immutability trigger safely
+      await systemPool.query(`SELECT system.purge_old_logs($1, $2)`, [req.params.slug, Number(req.query.days)]); 
+      res.json({ success: true }); 
+  } catch (e: any) { next(e); }
 });
 
 // --- EDGE FUNCTIONS (ENHANCED WITH GLOBALS) ---
@@ -2059,18 +2224,6 @@ app.post('/api/data/:slug/edge/:name', async (req: any, res: any, next: NextFunc
 // 1. Root Handler: Auto-Discovery (OpenAPI)
 app.all('/api/data/:slug/rest/v1', async (req: any, res: any, next: NextFunction) => {
     const r = req as CascataRequest;
-    
-    // SECURITY CHECK: Schema Exposure
-    // Allow system requests (Dashboard/Docs) to proceed.
-    // Block everyone else IF 'schema_exposure' is false/undefined.
-    const isDiscoveryEnabled = r.project.metadata?.schema_exposure === true;
-    if (!r.isSystemRequest && !isDiscoveryEnabled) {
-         return res.status(403).json({ 
-             error: 'API Schema Discovery is disabled.',
-             hint: 'Enable "Schema Exposure" in Project Settings > API Schema Discovery to access this endpoint.'
-         });
-    }
-
     try {
         const protocol = req.headers['x-forwarded-proto'] || 'http';
         const host = req.headers.host;
@@ -2192,7 +2345,7 @@ app.use((err: any, req: any, res: any, next: NextFunction) => {
 
 (async () => {
   try {
-    console.log('[System] Starting Cascata Secure Engine v9.5 (Production Release)...');
+    console.log('[System] Starting Cascata Secure Engine v9.6 (Production Release)...');
     cleanTempUploads();
     app.listen(PORT, () => console.log(`[CASCATA SECURE ENGINE] Listening on port ${PORT}`));
     CertificateService.ensureSystemCert().catch(e => console.error("Cert Init Error:", e));
