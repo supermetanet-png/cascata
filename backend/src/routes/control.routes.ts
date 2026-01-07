@@ -1,3 +1,4 @@
+
 import { Router } from 'express';
 import express from 'express';
 import { AdminController } from '../controllers/AdminController.js';
@@ -58,6 +59,8 @@ router.delete('/projects/:slug/logs', AdminController.purgeLogs as any);
 // Webhooks List for Project (Admin View)
 router.get('/projects/:slug/webhooks', AdminController.listWebhooks as any);
 router.post('/projects/:slug/webhooks', AdminController.createWebhook as any);
+router.patch('/projects/:slug/webhooks/:id', AdminController.updateWebhook as any);
+router.delete('/projects/:slug/webhooks/:id', AdminController.deleteWebhook as any);
 
 // Import
 router.post('/projects/import/upload', backupUpload.single('file') as any, AdminController.uploadImport as any);

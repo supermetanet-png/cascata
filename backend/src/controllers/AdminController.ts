@@ -1,3 +1,4 @@
+
 import { NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
@@ -17,6 +18,7 @@ const generateKey = () => import('crypto').then(c => c.randomBytes(32).toString(
 
 export class AdminController {
     
+    // ... (Métodos de login e projeto mantidos para integridade) ...
     static async login(req: CascataRequest, res: any, next: NextFunction) {
         const { email, password } = req.body;
         try {
@@ -86,7 +88,6 @@ export class AdminController {
             
             await systemPool.query(`CREATE DATABASE "${dbName}"`);
             
-            // USE DIRECT CONNECTION FOR DDL (CREATE EXTENSION etc)
             const dbHost = process.env.DB_DIRECT_HOST || 'db';
             const dbPort = process.env.DB_DIRECT_PORT || '5432';
             const user = process.env.DB_USER || 'cascata_admin';
@@ -130,9 +131,7 @@ export class AdminController {
             const result = await systemPool.query(query, values);
             const updatedProject = result.rows[0];
 
-            // Reload pool if db_config changed
             if (metadata && metadata.db_config) {
-                 console.log(`[System] DB Config change detected for ${updatedProject.slug}. Reloading pool...`);
                  try {
                      await PoolService.reload(updatedProject.db_name, {
                          max: metadata.db_config.max_connections,
@@ -168,8 +167,6 @@ export class AdminController {
             res.json({ success: true });
         } catch (e: any) { next(e); }
     }
-
-    // ... (Outros métodos permanecem inalterados, pois usam systemPool) ...
 
     static async revealKey(req: CascataRequest, res: any, next: NextFunction) {
         const { password, keyType } = req.body;
@@ -307,13 +304,21 @@ export class AdminController {
         } catch (e: any) { res.status(500).json({ error: e.message }); }
     }
 
+    // --- UPDATED WEBHOOK METHODS ---
+
     static async testWebhook(req: CascataRequest, res: any, next: NextFunction) {
         const { payload } = req.body;
         try {
             const hook = (await systemPool.query('SELECT * FROM system.webhooks WHERE id = $1', [req.params.id])).rows[0];
             if (!hook) return res.status(404).json({ error: "Webhook not found" });
             
-            await WebhookService.dispatch(hook.project_slug, hook.table_name, hook.event_type, payload || { test: true }, systemPool, SYS_SECRET);
+            const projectRes = await systemPool.query(
+                "SELECT pgp_sym_decrypt(jwt_secret::bytea, $1) as jwt_secret FROM system.projects WHERE slug = $2", 
+                [SYS_SECRET, hook.project_slug]
+            );
+            const jwtSecret = projectRes.rows[0]?.jwt_secret || 'test_secret';
+
+            await WebhookService.dispatch(hook.project_slug, hook.table_name, hook.event_type, payload || { test: true }, systemPool, jwtSecret);
             res.json({ success: true });
         } catch(e: any) { next(e); }
     }
@@ -323,9 +328,48 @@ export class AdminController {
     }
 
     static async createWebhook(req: CascataRequest, res: any, next: NextFunction) {
-        const { target_url, event_type, table_name } = req.body;
+        const { target_url, event_type, table_name, filters, fallback_url, retry_policy } = req.body; // Added new fields
         try {
-            const result = await systemPool.query("INSERT INTO system.webhooks (project_slug, target_url, event_type, table_name) VALUES ($1, $2, $3, $4) RETURNING *", [req.params.slug, target_url, event_type, table_name]);
+            const projectRes = await systemPool.query("SELECT pgp_sym_decrypt(jwt_secret::bytea, $1) as jwt_secret FROM system.projects WHERE slug = $2", [SYS_SECRET, req.params.slug]);
+            const secret = projectRes.rows[0]?.jwt_secret;
+
+            const result = await systemPool.query(
+                "INSERT INTO system.webhooks (project_slug, target_url, event_type, table_name, secret_header, filters, fallback_url, retry_policy) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *", 
+                [req.params.slug, target_url, event_type, table_name, secret, JSON.stringify(filters || []), fallback_url, retry_policy || 'standard']
+            );
+            res.json(result.rows[0]);
+        } catch (e: any) { next(e); }
+    }
+
+    static async deleteWebhook(req: CascataRequest, res: any, next: NextFunction) {
+        try {
+            await systemPool.query('DELETE FROM system.webhooks WHERE id = $1 AND project_slug = $2', [req.params.id, req.params.slug]);
+            res.json({ success: true });
+        } catch (e: any) { next(e); }
+    }
+
+    static async updateWebhook(req: CascataRequest, res: any, next: NextFunction) {
+        const { target_url, event_type, table_name, is_active, filters, fallback_url, retry_policy } = req.body;
+        try {
+            const fields = [];
+            const values = [];
+            let idx = 1;
+
+            if (target_url !== undefined) { fields.push(`target_url = $${idx++}`); values.push(target_url); }
+            if (event_type !== undefined) { fields.push(`event_type = $${idx++}`); values.push(event_type); }
+            if (table_name !== undefined) { fields.push(`table_name = $${idx++}`); values.push(table_name); }
+            if (is_active !== undefined) { fields.push(`is_active = $${idx++}`); values.push(is_active); }
+            if (filters !== undefined) { fields.push(`filters = $${idx++}`); values.push(JSON.stringify(filters)); }
+            if (fallback_url !== undefined) { fields.push(`fallback_url = $${idx++}`); values.push(fallback_url); }
+            if (retry_policy !== undefined) { fields.push(`retry_policy = $${idx++}`); values.push(retry_policy); }
+
+            if (fields.length === 0) return res.json({ success: true });
+
+            values.push(req.params.id);
+            values.push(req.params.slug);
+
+            const query = `UPDATE system.webhooks SET ${fields.join(', ')} WHERE id = $${idx++} AND project_slug = $${idx++} RETURNING *`;
+            const result = await systemPool.query(query, values);
             res.json(result.rows[0]);
         } catch (e: any) { next(e); }
     }

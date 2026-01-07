@@ -45,8 +45,6 @@ export const auditLogger: RequestHandler = (req: any, res: any, next: any) => {
   (res as any).json = function(data: any) {
     if (r.project) {
        const duration = Date.now() - start;
-       const isUpload = req.headers['content-type']?.includes('multipart/form-data');
-       const payload = isUpload ? { type: 'binary_upload' } : req.body;
        const forwarded = req.headers['x-forwarded-for'];
        const realIp = req.headers['x-real-ip'];
        const socketIp = (req as any).socket?.remoteAddress;
@@ -56,6 +54,11 @@ export const auditLogger: RequestHandler = (req: any, res: any, next: any) => {
        const semanticAction = detectSemanticAction(req.method, req.path);
        const geoInfo = { is_internal: isInternal, auth_status: res.statusCode >= 400 ? 'SECURITY_ALERT' : 'GRANTED', semantic_action: semanticAction };
 
+       // Request Payload for Audit Logs (Input)
+       const isUpload = req.headers['content-type']?.includes('multipart/form-data');
+       const inputPayload = isUpload ? { type: 'binary_upload', file: req.file?.originalname } : req.body;
+
+       // Security: Auto Block 401
        if (res.statusCode === 401 && r.project.metadata?.security?.auto_block_401) {
           const isSafeIp = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp.startsWith('172.') || clientIp.startsWith('10.') || clientIp.startsWith('192.168.'); 
           if (!isSafeIp && !r.project.blocklist?.includes(clientIp)) {
@@ -63,15 +66,39 @@ export const auditLogger: RequestHandler = (req: any, res: any, next: any) => {
           }
        }
 
+       // 1. Audit Log Insert
        systemPool.query(
         `INSERT INTO system.api_logs (project_slug, method, path, status_code, client_ip, duration_ms, user_role, payload, headers, geo_info) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [r.project.slug, req.method, req.path, res.statusCode, clientIp, duration, r.userRole || 'unauthorized', JSON.stringify(payload).substring(0, 2000), JSON.stringify({ referer: req.headers.referer, userAgent: req.headers['user-agent'] }), JSON.stringify(geoInfo)]
+        [r.project.slug, req.method, req.path, res.statusCode, clientIp, duration, r.userRole || 'unauthorized', JSON.stringify(inputPayload).substring(0, 2000), JSON.stringify({ referer: req.headers.referer, userAgent: req.headers['user-agent'] }), JSON.stringify(geoInfo)]
        ).catch(() => {});
        
+       // 2. Webhook Dispatch (ONLY on Success 2xx)
+       // CRITICAL IMPROVEMENT: Use `data` (Response Body) instead of `req.body` (Request Body).
+       // This ensures webhooks receive the generated IDs, Timestamps, and Default Values.
        if (res.statusCode >= 200 && res.statusCode < 300 && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
            let tableName = '*';
-           if (req.path.includes('/tables/')) { const parts = req.path.split('/tables/'); if (parts[1]) tableName = parts[1].split('/')[0]; }
-           WebhookService.dispatch(r.project.slug, tableName, semanticAction || req.method, payload, systemPool, r.project.jwt_secret);
+           // Extract table name from path
+           if (req.path.includes('/tables/')) { 
+               const parts = req.path.split('/tables/'); 
+               if (parts[1]) tableName = parts[1].split('/')[0]; 
+           } else if (req.path.includes('/rest/v1/')) {
+               const parts = req.path.split('/rest/v1/'); 
+               if (parts[1]) tableName = parts[1].split('/')[0];
+           }
+
+           // Determine Payload to Send
+           // If it's a delete, the response usually contains the deleted record(s).
+           // If it's an insert/update, the response contains the new record(s).
+           const webhookPayload = data; 
+
+           WebhookService.dispatch(
+               r.project.slug, 
+               tableName, 
+               semanticAction || req.method, 
+               webhookPayload, 
+               systemPool, 
+               r.project.jwt_secret
+           );
        }
     }
     return oldJson.apply(res, arguments as any);

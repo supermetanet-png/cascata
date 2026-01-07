@@ -1,3 +1,4 @@
+
 import { Pool } from 'pg';
 import { QueueService } from './QueueService.js';
 
@@ -10,11 +11,38 @@ interface WebhookPayload {
     timestamp: string;
 }
 
+interface FilterRule {
+    field: string;
+    operator: 'eq' | 'neq' | 'gt' | 'lt' | 'contains' | 'starts_with';
+    value: string;
+}
+
 export class WebhookService {
     
-    /**
-     * Enfileira webhooks para processamento assíncrono e resiliente.
-     */
+    private static matchesFilters(record: any, filters: FilterRule[]): boolean {
+        if (!filters || filters.length === 0) return true;
+        if (!record) return false;
+
+        for (const rule of filters) {
+            const recordValue = record[rule.field];
+            const valA = recordValue; 
+            const valB = rule.value;
+
+            if (valA === undefined) return false;
+
+            switch (rule.operator) {
+                case 'eq': if (valA != valB) return false; break;
+                case 'neq': if (valA == valB) return false; break;
+                case 'gt': if (Number(valA) <= Number(valB)) return false; break;
+                case 'lt': if (Number(valA) >= Number(valB)) return false; break;
+                case 'contains': if (!String(valA).toLowerCase().includes(String(valB).toLowerCase())) return false; break;
+                case 'starts_with': if (!String(valA).startsWith(String(valB))) return false; break;
+                default: return false;
+            }
+        }
+        return true;
+    }
+
     public static async dispatch(
         projectSlug: string,
         tableName: string,
@@ -24,9 +52,9 @@ export class WebhookService {
         projectSecret: string
     ) {
         try {
-            // 1. Buscar webhooks ativos para este projeto e tabela
+            // 1. Buscar webhooks com fallback e retry policy
             const res = await systemPool.query(
-                `SELECT target_url, secret_header, event_type 
+                `SELECT target_url, secret_header, event_type, filters, fallback_url, retry_policy 
                  FROM system.webhooks 
                  WHERE project_slug = $1 
                  AND is_active = true 
@@ -45,16 +73,29 @@ export class WebhookService {
                 timestamp: new Date().toISOString()
             };
 
-            // 2. Enviar para a Fila (QueueService)
-            // Agora é Non-Blocking e Persistente
+            let dispatchedCount = 0;
+
             for (const hook of res.rows) {
+                const filters = hook.filters as FilterRule[];
+                if (!this.matchesFilters(payloadData, filters)) {
+                    continue; 
+                }
+
                 await QueueService.addWebhookJob({
                     targetUrl: hook.target_url,
                     payload: fullPayload,
                     secret: hook.secret_header || projectSecret,
                     eventType: eventType,
-                    tableName: tableName
+                    tableName: tableName,
+                    // New Reliability Fields
+                    fallbackUrl: hook.fallback_url,
+                    retryPolicy: hook.retry_policy
                 });
+                dispatchedCount++;
+            }
+            
+            if (dispatchedCount > 0) {
+                console.log(`[WebhookService] Dispatched ${dispatchedCount} events for ${tableName} (${eventType})`);
             }
 
         } catch (e) {
