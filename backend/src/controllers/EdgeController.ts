@@ -1,11 +1,10 @@
-
 import { NextFunction } from 'express';
 import { CascataRequest } from '../types.js';
 import { systemPool } from '../config/main.js';
 import { EdgeService } from '../../services/EdgeService.js';
 
 export class EdgeController {
-    static async execute(req: CascataRequest, res: any, next: any) {
+    static async execute(req: CascataRequest, res: any, next: NextFunction) {
         try {
             const assetRes = await systemPool.query("SELECT * FROM system.assets WHERE project_slug = $1 AND name = $2 AND type = 'edge_function'", [req.project.slug, req.params.name]);
             if (assetRes.rows.length === 0) throw new Error("Edge Function Not Found");

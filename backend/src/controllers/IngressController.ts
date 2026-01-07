@@ -6,13 +6,8 @@ import { IngressService } from '../../services/IngressService.js';
 
 export class IngressController {
 
-    static async handleIncoming(req: CascataRequest, res: any, next: any) {
+    static async handleIncoming(req: CascataRequest, res: any, next: NextFunction) {
         const { routeSlug } = req.params;
-        
-        // Middleware resolves project, but TS needs assertion
-        if (!req.project) {
-            return res.status(404).json({ error: 'Project context not resolved' });
-        }
         const projectSlug = req.project.slug;
 
         try {
@@ -41,8 +36,7 @@ export class IngressController {
     }
     
     // CRUD para o Painel (Control Plane)
-    static async listHooks(req: CascataRequest, res: any, next: any) {
-        if (!req.project) return res.status(404).json({ error: 'Project not found' });
+    static async listHooks(req: CascataRequest, res: any, next: NextFunction) {
         try {
             const result = await systemPool.query(
                 'SELECT * FROM system.ingress_hooks WHERE project_slug = $1 ORDER BY created_at DESC', 
@@ -52,8 +46,7 @@ export class IngressController {
         } catch (e: any) { next(e); }
     }
 
-    static async createHook(req: CascataRequest, res: any, next: any) {
-        if (!req.project) return res.status(404).json({ error: 'Project not found' });
+    static async createHook(req: CascataRequest, res: any, next: NextFunction) {
         const { name, route_slug, security_config, flow_definition } = req.body;
         try {
             const result = await systemPool.query(
@@ -65,8 +58,7 @@ export class IngressController {
         } catch (e: any) { next(e); }
     }
 
-    static async updateHook(req: CascataRequest, res: any, next: any) {
-        if (!req.project) return res.status(404).json({ error: 'Project not found' });
+    static async updateHook(req: CascataRequest, res: any, next: NextFunction) {
         const { name, security_config, flow_definition, is_active } = req.body;
         try {
             const fields = [];
@@ -89,8 +81,7 @@ export class IngressController {
         } catch (e: any) { next(e); }
     }
 
-    static async deleteHook(req: CascataRequest, res: any, next: any) {
-        if (!req.project) return res.status(404).json({ error: 'Project not found' });
+    static async deleteHook(req: CascataRequest, res: any, next: NextFunction) {
         try {
             await systemPool.query('DELETE FROM system.ingress_hooks WHERE id = $1 AND project_slug = $2', [req.params.id, req.project.slug]);
             res.json({ success: true });
