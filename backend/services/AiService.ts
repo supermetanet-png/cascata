@@ -5,10 +5,6 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export class AiService {
     
-    private static getClient() {
-        return new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-    }
-
     private static async getContext(pool: Pool) {
         try {
             const tablesRes = await pool.query(`
@@ -36,7 +32,8 @@ export class AiService {
     }
 
     private static async generateWithRetry(parameters: { model: string, contents: any, config?: any }, retries = 3, delay = 1000): Promise<string> {
-        const ai = this.getClient();
+        // Inicialização direta conforme diretriz de segurança e performance
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
         try {
             const response = await ai.models.generateContent(parameters);
             return response.text || '';
@@ -65,7 +62,8 @@ export class AiService {
             You are Cascata Architect, a world-class senior solo leveling backend engineer.
             You are managing a multi-tenant BaaS project named "${projectSlug}".
             
-            Current ${context}
+            Current Database State:
+            ${context}
             
             Strict Operational Rules:
             1. For table creation, return a JSON block (wrapped in \`\`\`json):
@@ -78,7 +76,8 @@ export class AiService {
                 ]
             }
             2. For SQL queries, wrap them in \`\`\`sql.
-            3. Be precise, technical, and prioritize PostgreSQL best practices.
+            3. Be precise, technical, and prioritize PostgreSQL best practices (indexes, foreign keys, RLS).
+            4. Never hallucinate tables that don't exist in the context above.
         `;
 
         const lastMsg = messages[messages.length - 1].content;
@@ -114,7 +113,7 @@ export class AiService {
         Schema Information:
         ${schemaStr}
         
-        Use Markdown. Include code examples using 'curl'. Focus on production robustness.`;
+        Use Markdown. Include code examples using 'curl' and 'javascript'. Focus on production robustness.`;
         
         const text = await this.generateWithRetry({ model: modelName, contents: prompt });
 
@@ -140,7 +139,7 @@ export class AiService {
         
         Error Message: "${error}"
         
-        Task: Analyze the error and return the CORRECTED SQL inside a \`\`\`sql block. Explain briefly the fix.`;
+        Task: Analyze the error and return the CORRECTED SQL inside a \`\`\`sql block. Explain briefly why it failed.`;
 
         const text = await this.generateWithRetry({ model: modelName, contents: prompt });
         
@@ -151,7 +150,7 @@ export class AiService {
     public static async explainCode(projectSlug: string, pool: Pool, systemSettings: any, code: string, type: 'sql' | 'js') {
         const modelName = 'gemini-3-pro-preview';
         const prompt = `You are a Senior Engineer. Explain the following ${type.toUpperCase()} code implemented for project "${projectSlug}".
-        Highlight security implications and performance considerations.
+        Highlight security implications, performance considerations, and common pitfalls.
         
         Code:
         \`\`\`${type}
