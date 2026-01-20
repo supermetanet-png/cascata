@@ -15,7 +15,7 @@ interface ProjectMetadata {
     anon_key: string;
     service_key: string;
     custom_domain?: string;
-    storage_path?: string;
+    metadata?: any;
 }
 
 interface TableDefinition {
@@ -31,18 +31,19 @@ export class BackupService {
 
         archive.on('error', (err) => {
             console.error('[BackupService] Archiver error:', err);
-            if (!res.headersSent) res.status(500).send({ error: 'Falha durante a compressão do backup.' });
+            if (!res.headersSent) res.status(500).send({ error: 'Falha crítica na compressão do snapshot .CAF' });
             else res.end();
         });
 
-        res.attachment(`${project.slug}_full_hybrid_backup_${new Date().toISOString().split('T')[0]}.caf`);
+        // Nomeclatura oficial .CAF
+        res.attachment(`${project.slug}_${new Date().toISOString().split('T')[0]}.caf`);
         archive.pipe(res);
 
         try {
-            // 1. MANIFESTO (Atualizado para v1.2 Hybrid)
+            // 1. MANIFESTO .CAF 2.0 (Híbrido)
             const manifest = {
-                version: '1.2',
-                type: 'hybrid_snapshot',
+                version: '2.0',
+                engine: 'Cascata-Cheshire-Symbiosis',
                 exported_at: new Date().toISOString(),
                 project: {
                     name: project.name,
@@ -51,57 +52,55 @@ export class BackupService {
                     jwt_secret: project.jwt_secret, 
                     anon_key: project.anon_key,
                     service_key: project.service_key,
-                    custom_domain: project.custom_domain
-                },
-                vector_engine: 'qdrant_v1'
+                    custom_domain: project.custom_domain,
+                    // Inclui a matriz de vulto (PCA) se existir no metadata para a VPS 3
+                    semantic_matrix: project.metadata?.semantic_matrix || null 
+                }
             };
             archive.append(JSON.stringify(manifest, null, 2), { name: 'manifest.json' });
 
-            // 2. SCHEMA SQL
+            // 2. CORPO (Estrutura Relacional)
             const schemaStream = await this.getSchemaDumpStream(project.db_name);
-            archive.append(schemaStream, { name: 'schema/structure.sql' });
+            archive.append(schemaStream, { name: 'graph/structure.sql' });
 
-            // 3. DADOS SQL
+            // 3. MEMÓRIA ATÔMICA (Dados)
             const tables = await this.listTables(project.db_name);
             for (const table of tables) {
                 const tableStream = await this.getTableDataStream(project.db_name, table.schema, table.name);
                 archive.append(tableStream, { name: `data/${table.schema}.${table.name}.csv` });
             }
 
-            // 4. VECTOR SNAPSHOT (Qdrant)
-            console.log(`[BackupService] Capturing vector state for ${project.slug}...`);
+            // 4. SORRISO (Intuição Vetorial - Qdrant Snapshot)
+            console.log(`[CAF:Snapshot] Capturing vector state for ${project.slug}...`);
             try {
-                // Solicita snapshot ao Qdrant
+                // Solicita snapshot da coleção específica do projeto
                 const snapRes = await axios.post(`${qdrantUrl}/collections/${project.slug}/snapshots`);
                 const snapName = snapRes.data.result.name;
                 
-                // Faz stream do download do snapshot direto para o ZIP
                 const snapDownloadUrl = `${qdrantUrl}/collections/${project.slug}/snapshots/${snapName}`;
                 const snapStream = await axios.get(snapDownloadUrl, { responseType: 'stream' });
                 
                 archive.append(snapStream.data, { name: `vector/snapshot.qdrant` });
                 
-                // Cleanup: Remove o snapshot temporário do servidor Qdrant
+                // Cleanup assíncrono no servidor Qdrant
                 snapStream.data.on('end', () => {
-                    axios.delete(snapDownloadUrl).catch(e => console.warn(`[BackupService] Qdrant cleanup failed: ${e.message}`));
+                    axios.delete(snapDownloadUrl).catch(() => {});
                 });
             } catch (vErr: any) {
-                console.warn(`[BackupService] Vector backup skipped or failed: ${vErr.message}`);
-                archive.append('Vector state not available or collection missing.', { name: 'vector/error.log' });
+                console.warn(`[CAF:Warning] Vector state skipped: ${vErr.message}`);
+                archive.append('Vector state not available or collection missing.', { name: 'vector/missing.log' });
             }
 
-            // 5. STORAGE FILES
+            // 5. ASSETS (Storage)
             const projectStoragePath = path.resolve(process.env.STORAGE_ROOT || '../storage', project.slug);
             if (fs.existsSync(projectStoragePath)) {
                 archive.directory(projectStoragePath, 'storage');
-            } else {
-                archive.append('', { name: 'storage/.keep' }); 
             }
 
             await archive.finalize();
 
         } catch (e: any) {
-            console.error('[BackupService] Critical Error:', e);
+            console.error('[BackupService] .CAF Generation Failed:', e);
             archive.abort(); 
             throw e;
         }

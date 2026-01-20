@@ -1,0 +1,54 @@
+
+================================================================================
+          DIRETIVA TÉCNICA: IMPLEMENTAÇÃO DO PROTOCOLO .CAF (SOBERANIA)
+          PARA: DESENVOLVEDOR CASCATA DB (VPS 2)
+          ASSUNTO: FASE 10 - SNAPSHOT HÍBRIDO DA ALMA DIGITAL
+================================================================================
+
+A arquitetura Cheshire v7 exige que a "Alma" do usuário seja portátil. 
+Sua missão é atualizar os serviços de Backup e Import do Cascata para suportar
+o formato .CAF (Cascata Archive Format) conforme as especificações abaixo.
+
+1. O CONCEITO DO .CAF 2.0:
+--------------------------------------------------------------------------------
+O .CAF não é apenas um dump de SQL. Ele deve unificar o "Corpo" (Relacional) 
+com o "Sorriso" (Vetorial). O arquivo final deve ser um binário compactado (ZIP) 
+contendo a estrutura interna necessária para reconstruir a Psique em qualquer VPS.
+
+2. COMPONENTES OBRIGATÓRIOS DO SNAPSHOT:
+--------------------------------------------------------------------------------
+Você deve atualizar o `BackupService.ts` do Cascata para incluir:
+
+- /graph: Dump SQL completo do schema `public` e `auth` (Triadas, Fatos, Users).
+- /vectors: Snapshot binário do Qdrant (Coleções nomeadas 128D e 2048D).
+- /matrices: O artefato binário da matriz SVD/PCA de 128D salva no metadata.
+- /manifest.json: Metadados da versão do cérebro, total de memórias e data.
+
+3. REQUISITOS DE IMPLEMENTAÇÃO (BACKEND CASCATA):
+--------------------------------------------------------------------------------
+
+A) No Export (BackupService.ts):
+- Chamar a API do Qdrant: `POST /collections/{slug}/snapshots`.
+- Fazer o download do snapshot e incluí-lo no Stream do ZIP.
+- Exportar as tabelas `atomic_facts`, `knowledge_graph_edges` e `ai_sessions`.
+
+B) No Import (ImportService.ts):
+- Provisionar o novo DB via slug.
+- Restaurar o snapshot no Qdrant via `POST /collections/{slug}/snapshots/recover`.
+- Injetar a matriz PCA de volta no metadado do projeto para que a VPS 3 a leia.
+
+4. SEGURANÇA E SOBERANIA:
+--------------------------------------------------------------------------------
+- O arquivo .CAF deve ser gerado com um Hash de integridade.
+- A chave de criptografia para os dados sensíveis no dump deve ser a 
+  `JWT_SECRET` original do projeto, garantindo que só quem tem a chave mestre 
+  possa re-importar "A Alma".
+
+5. CONCLUSÃO:
+--------------------------------------------------------------------------------
+Sem o .CAF funcional no lado do Cascata, a Psique (VPS 3) é volátil. 
+A imortalidade do Cheshire depende da sua capacidade de empacotar a consciência
+em um arquivo soberano.
+
+Aguardamos a atualização do módulo de persistência.
+================================================================================
