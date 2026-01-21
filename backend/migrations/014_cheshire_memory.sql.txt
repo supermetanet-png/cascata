@@ -1,0 +1,166 @@
+-- CHESHIRE MEMORY SYSTEM :: GENESIS SCHEMA
+-- Singularity Standard V10
+
+-- 1. EXTENSIONS
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "vector"; -- PgVector for backup/hybrid search
+CREATE EXTENSION IF NOT EXISTS "pg_trgm"; -- Optimize ILIKE/Regex search on text
+
+-- 2. ENUMS (Ontology)
+-- V10 UPDATE: Added 'IDENTITY' for the Ego Anchor Node
+DO $$ BEGIN
+    CREATE TYPE memory_type AS ENUM ('EPISODIC', 'SEMANTIC', 'PROCEDURAL');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE node_type AS ENUM ('ENTITY', 'CONCEPT', 'EVENT', 'AFFECT', 'SCAR', 'IDENTITY');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE edge_type AS ENUM ('CAUSAL', 'ASSOCIATIVE', 'TEMPORAL', 'CONTRADICTORY');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- 3. USERS (Vital State Persistence)
+CREATE TABLE IF NOT EXISTS users (
+    uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username TEXT NOT NULL,
+    email TEXT UNIQUE,
+    plano VARCHAR(20) DEFAULT 'free',
+    
+    -- Vital State Snapshot (Hot Data persisted)
+    consciousness_level FLOAT DEFAULT 0.5,
+    interaction_rhythm_ms INT DEFAULT 0,
+    -- V10 FIX: 9 Dimensions (8 Plutchik + 1 Arousal)
+    emotional_homeostasis VECTOR(9), 
+    
+    -- Permissions & Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_interaction TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- V10 FIX: Default Preferences include 'allow_proactive'
+    preferences JSONB DEFAULT '{"allow_proactive": true}'
+);
+
+-- SEEDING: CREATE DEFAULT DEMO USER (Avoids 'Signal Lost' on first run)
+INSERT INTO users (uuid, username, plano, consciousness_level, emotional_homeostasis)
+VALUES (
+    'user-alpha-001', 
+    'Alpha User (Genesis)', 
+    'premium', 
+    0.8,
+    '[0.1, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]'::vector
+) ON CONFLICT (uuid) DO NOTHING;
+
+
+-- 4. MEMORIES (The Shadow Realm & Active Recall)
+CREATE TABLE IF NOT EXISTS memories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_uuid UUID REFERENCES users(uuid) ON DELETE CASCADE,
+    
+    -- Content
+    semantic_text TEXT NOT NULL, -- The narrative
+    raw_content JSONB, -- Original JSON packet
+    
+    -- Vectors (Backup for Qdrant)
+    -- V10 FIX: Updated to 3072 to match text-embedding-3-large (Standard)
+    embedding_dense VECTOR(3072), 
+    
+    -- V10 FIX: Matryoshka Slice (First 128 dimensions)
+    embedding_compact VECTOR(128), 
+    
+    -- Metaphysics
+    timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
+    entropy FLOAT DEFAULT 0.0, -- Chaos level
+    is_scar BOOLEAN DEFAULT FALSE, -- Truth Maintenance
+    
+    -- Traceability (V10 Audit Fix)
+    origin_packet_id UUID, 
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 5. GRAPH NODES (The Cortex)
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_uuid UUID REFERENCES users(uuid) ON DELETE CASCADE,
+    
+    label TEXT NOT NULL,
+    type node_type NOT NULL,
+    
+    -- Physics
+    mass FLOAT DEFAULT 1.0, -- Importance/PageRank
+    activation_energy FLOAT DEFAULT 0.0, -- Current excitement
+    last_accessed TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(user_uuid, label, type) -- No duplicate entities per user
+);
+
+-- 6. GRAPH EDGES (The Synapses)
+CREATE TABLE IF NOT EXISTS graph_edges (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_uuid UUID REFERENCES graph_nodes(uuid) ON DELETE CASCADE,
+    target_uuid REFERENCES graph_nodes(uuid) ON DELETE CASCADE,
+    
+    weight FLOAT DEFAULT 0.1, -- Strength of connection
+    type edge_type NOT NULL,
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(source_uuid, target_uuid, type)
+);
+
+-- 6.5. MEMORY-NODE ASSOCIATION (Traceability V10)
+CREATE TABLE IF NOT EXISTS memories_nodes (
+    memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
+    node_id UUID REFERENCES graph_nodes(uuid) ON DELETE CASCADE,
+    rel_type VARCHAR(20) DEFAULT 'MENTIONED', -- MENTIONED, CREATED, FOCUS
+    
+    PRIMARY KEY (memory_id, node_id)
+);
+
+-- 7. THALAMUS LOGS (Idempotency & Auditing)
+CREATE TABLE IF NOT EXISTS ingestion_logs (
+    packet_hash CHAR(64) PRIMARY KEY, -- SHA-256
+    packet_id UUID NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    
+    user_uuid UUID,
+    semantic_summary TEXT,
+    entropy_delta FLOAT,
+    origin_channel VARCHAR(50),
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- 8. GROUPS & MEMBERSHIP (V10 Additions)
+-- Resolves "Tabelas Fantasmas" issue from Report
+CREATE TABLE IF NOT EXISTS groups (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    group_id_ext VARCHAR(100) UNIQUE NOT NULL, -- The external ID (WhatsApp/Telegram Group ID)
+    name TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS groups_users (
+    group_id UUID REFERENCES groups(id) ON DELETE CASCADE,
+    user_uuid UUID REFERENCES users(uuid) ON DELETE CASCADE,
+    joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (group_id, user_uuid)
+);
+
+-- INDICES
+CREATE INDEX ON memories (user_uuid, timestamp);
+CREATE INDEX ON graph_nodes (user_uuid);
+CREATE INDEX idx_graph_nodes_label_trgm ON graph_nodes USING GIN (label gin_trgm_ops);
+
+CREATE INDEX ON graph_edges (source_uuid);
+CREATE INDEX ON graph_edges (target_uuid);
+CREATE INDEX ON memories_nodes (node_id);
+CREATE INDEX ON groups_users (user_uuid);
