@@ -1,6 +1,6 @@
 import { Response, Request } from 'express';
 import { Client } from 'pg';
-import { PoolService } from './PoolService.js';
+import { systemPool } from '../config/main.js';
 
 interface ClientConnection {
     id: string;
@@ -12,11 +12,19 @@ export class RealtimeService {
     private static subscribers = new Map<string, Set<ClientConnection>>();
     private static listeners = new Map<string, Client>();
     
-    private static MAX_CLIENTS_PER_PROJECT = 2000; // Aumentado
+    private static MAX_CLIENTS_PER_PROJECT = 5000; // Escala Elite
 
     public static async handleConnection(req: any, res: any) {
         const slug = req.params.slug;
         const { table } = req.query;
+
+        // Recupera contexto do projeto (injetado pelo middleware resolveProject)
+        const project = req.project;
+
+        if (!project) {
+            res.status(404).json({ error: 'Project context missing.' });
+            return;
+        }
 
         const currentCount = this.subscribers.get(slug)?.size || 0;
         if (currentCount >= this.MAX_CLIENTS_PER_PROJECT) {
@@ -35,8 +43,9 @@ export class RealtimeService {
         const clientId = Date.now().toString(36) + Math.random().toString(36).substr(2);
         res.write(`data: ${JSON.stringify({ type: 'connected', clientId })}\n\n`);
 
+        // Inicializa Listener do PostgreSQL se não existir
         if (!this.listeners.has(slug)) {
-            await this.setupProjectListener(slug);
+            await this.setupProjectListener(project);
         }
 
         if (!this.subscribers.has(slug)) {
@@ -51,8 +60,9 @@ export class RealtimeService {
         
         this.subscribers.get(slug)!.add(connection);
 
+        // Keep-alive para evitar timeout de load balancers (AWS ALB / Nginx)
         const heartbeat = setInterval(() => {
-            res.write(': ping\n\n');
+            if (!res.writableEnded) res.write(': ping\n\n');
         }, 15000);
 
         req.on('close', () => {
@@ -64,22 +74,36 @@ export class RealtimeService {
         });
     }
 
-    private static async setupProjectListener(slug: string) {
-        console.log(`[Realtime] Starting Listener for ${slug} (DIRECT MODE)`);
+    private static async setupProjectListener(project: any) {
+        const slug = project.slug;
+        console.log(`[Realtime] Starting Listener for ${slug}...`);
+        
         try {
-            // CRITICAL: Force Direct Connection for LISTEN/NOTIFY
-            // PgBouncer "Transaction Mode" breaks LISTEN/NOTIFY.
-            const dbName = `cascata_proj_${slug.replace(/-/g, '_')}`;
-            const host = process.env.DB_DIRECT_HOST || 'db';
-            const port = process.env.DB_DIRECT_PORT || '5432';
-            const user = process.env.DB_USER || 'cascata_admin';
-            const pass = process.env.DB_PASS || 'secure_pass';
-            
-            const connectionString = `postgresql://${user}:${pass}@${host}:${port}/${dbName}`;
+            let connectionString: string;
 
-            const listenerClient = new Client({ connectionString, keepAlive: true });
-            await listenerClient.connect();
+            // Lógica de Resolução de Conexão (Híbrida)
+            if (project.metadata?.external_db_url) {
+                console.log(`[Realtime] ${slug} is EJECTED. Connecting to external infrastructure.`);
+                connectionString = project.metadata.external_db_url;
+            } else {
+                // Modo Nativo (Docker Local)
+                const dbName = project.db_name;
+                const host = process.env.DB_DIRECT_HOST || 'db';
+                const port = process.env.DB_DIRECT_PORT || '5432';
+                const user = process.env.DB_USER || 'cascata_admin';
+                const pass = process.env.DB_PASS || 'secure_pass';
+                connectionString = `postgresql://${user}:${pass}@${host}:${port}/${dbName}`;
+            }
+
+            // CRITICAL: Force Direct Connection for LISTEN/NOTIFY.
+            // PgBouncer "Transaction Mode" quebra LISTEN/NOTIFY, então usamos Client direto.
+            const listenerClient = new Client({ 
+                connectionString, 
+                keepAlive: true,
+                ssl: project.metadata?.external_db_url ? { rejectUnauthorized: false } : false
+            });
             
+            await listenerClient.connect();
             await listenerClient.query('LISTEN cascata_events');
 
             listenerClient.on('notification', (msg) => {
@@ -100,7 +124,7 @@ export class RealtimeService {
         }
     }
 
-    private static teardownProjectListener(slug: string) {
+    public static teardownProjectListener(slug: string) {
         const client = this.listeners.get(slug);
         if (client) {
             console.log(`[Realtime] Closing Listener for ${slug}`);
@@ -114,8 +138,10 @@ export class RealtimeService {
         if (!clients) return;
         const message = `data: ${JSON.stringify(payload)}\n\n`;
         clients.forEach(client => {
-            if (!client.tableFilter || client.tableFilter === payload.table) {
-                client.res.write(message);
+            if (!client.res.writableEnded) {
+                if (!client.tableFilter || client.tableFilter === payload.table) {
+                    client.res.write(message);
+                }
             }
         });
     }

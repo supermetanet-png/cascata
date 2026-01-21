@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Shield, Key, Database, Activity, CheckCircle2, Loader2, Server, Settings2, Globe, Lock, Workflow, ExternalLink, Power, ArrowRight, BookOpen } from 'lucide-react';
+import { Shield, Key, Database, Activity, CheckCircle2, Loader2, Server, Settings2, Globe, Lock, Workflow, ExternalLink, Power, ArrowRight, BookOpen, Zap } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ProjectSettings from './ProjectSettings';
 
@@ -51,13 +51,19 @@ const ProjectDetail: React.FC<{ projectId: string }> = ({ projectId }) => {
       return `${window.location.origin}/api/data/${projectId}`;
   };
 
+  const isEjected = !!projectData?.metadata?.external_db_url;
+  const hasReplica = !!projectData?.metadata?.read_replica_url;
+
   return (
     <div className="p-8 lg:p-12 max-w-7xl mx-auto w-full space-y-12 pb-40">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-8">
         <div>
           <h1 className="text-5xl font-black text-slate-900 tracking-tighter">{projectId} Instance</h1>
           <div className="flex items-center gap-4 mt-3">
-            <span className="font-mono text-xs bg-slate-100 text-slate-500 px-3 py-1.5 rounded-xl font-bold border border-slate-200 uppercase tracking-widest">Isolated Host</span>
+            <span className={`font-mono text-xs px-3 py-1.5 rounded-xl font-bold border uppercase tracking-widest flex items-center gap-2 ${isEjected ? 'bg-indigo-50 text-indigo-600 border-indigo-200' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+                {isEjected ? <Zap size={12}/> : <Server size={12}/>}
+                {isEjected ? 'Ejected (External)' : 'Managed (Local)'}
+            </span>
             <span className="flex items-center gap-1.5 text-emerald-600 font-black text-[10px] uppercase tracking-widest bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-100">
               <CheckCircle2 size={14} /> System Healthy
             </span>
@@ -109,6 +115,12 @@ const ProjectDetail: React.FC<{ projectId: string }> = ({ projectId }) => {
                 <ConfigItem label="API Endpoint" value={getBaseUrl()} />
                 <ConfigItem label="Database ID" value={`cascata_proj_${projectId.replace(/-/g, '_')}`} />
                 <ConfigItem label="Auth Protocol" value="JWT physical isolation" />
+                {hasReplica && (
+                    <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-center gap-3">
+                        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                        <span className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Read Scaling Active</span>
+                    </div>
+                )}
               </div>
               
               <button 

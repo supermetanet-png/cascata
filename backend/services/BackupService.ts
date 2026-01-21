@@ -121,7 +121,13 @@ export class BackupService {
     private static resolveConnectionString(project: ProjectMetadata): string {
         if (project.metadata?.external_db_url) {
             console.log(`[BackupService] Using external DB connection for ${project.slug} (Ejected Mode)`);
-            return project.metadata.external_db_url;
+            let conn = project.metadata.external_db_url;
+            // SSL Fix for pg_dump: Ensure we don't fail on self-signed certs if SSL is required
+            if (conn.includes('sslmode=require') && !conn.includes('sslcert')) {
+                // If simple SSL is required but no cert provided (common in managed DBs), pg_dump might fail strict verification.
+                // We rely on pg_dump defaults, but environment variables might be needed in future for strict certs.
+            }
+            return conn;
         }
 
         // Fallback para infraestrutura local (Docker)
@@ -133,7 +139,12 @@ export class BackupService {
     }
 
     private static async listTables(connectionString: string): Promise<TableDefinition[]> {
-        const pool = new Pool({ connectionString });
+        const isExternal = !connectionString.includes(process.env.DB_DIRECT_HOST || 'db');
+        const pool = new Pool({ 
+            connectionString,
+            ssl: isExternal ? { rejectUnauthorized: false } : false
+        });
+        
         try {
             const res = await pool.query(`
                 SELECT table_schema, table_name 

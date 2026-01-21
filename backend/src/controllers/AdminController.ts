@@ -5,6 +5,7 @@ import pg from 'pg';
 import path from 'path';
 import fs from 'fs';
 import axios from 'axios';
+import { spawn } from 'child_process';
 import { CascataRequest } from '../types.js';
 import { systemPool, SYS_SECRET, STORAGE_ROOT } from '../config/main.js';
 import { DatabaseService } from '../../services/DatabaseService.js';
@@ -13,6 +14,7 @@ import { CertificateService } from '../../services/CertificateService.js';
 import { BackupService } from '../../services/BackupService.js';
 import { ImportService } from '../../services/ImportService.js';
 import { WebhookService } from '../../services/WebhookService.js';
+import { RealtimeService } from '../../services/RealtimeService.js';
 
 const generateKey = () => import('crypto').then(c => c.randomBytes(32).toString('hex'));
 
@@ -99,6 +101,99 @@ export class AdminController {
     static async updateProject(req: CascataRequest, res: any, next: any) {
         try {
             const { custom_domain, log_retention_days, metadata, ssl_certificate_source } = req.body;
+            
+            // --- SMART MIGRATION LOGIC (BYOD - AUTOMATED DATA PIPING) ---
+            if (metadata && metadata.external_db_url) {
+                const currentProj = (await systemPool.query('SELECT db_name, metadata FROM system.projects WHERE slug = $1', [req.params.slug])).rows[0];
+                const oldUrl = currentProj?.metadata?.external_db_url;
+                const dbName = currentProj.db_name;
+                
+                // Se a URL mudou ou é nova, iniciamos a migração completa
+                if (metadata.external_db_url !== oldUrl) {
+                    console.log(`[Admin] 🚀 Starting SMART MIGRATION for ${req.params.slug}...`);
+                    console.log(`[Admin] Target: ${metadata.external_db_url.replace(/:[^:]*@/, ':****@')}`);
+
+                    // 1. Connection Check
+                    const extClient = new pg.Client({ 
+                        connectionString: metadata.external_db_url,
+                        ssl: { rejectUnauthorized: false }
+                    });
+                    
+                    try {
+                        await extClient.connect();
+                        // 2. Provision Structure (Idempotent)
+                        await DatabaseService.initProjectDb(extClient);
+                        await extClient.end();
+                    } catch (dbErr: any) {
+                        return res.status(400).json({ error: `Connection/Provisioning Failed: ${dbErr.message}` });
+                    }
+
+                    // 3. DATA PIPING (Local -> Remote) via Stream
+                    // Construir connection string local
+                    const localHost = process.env.DB_DIRECT_HOST || 'db';
+                    const localPort = process.env.DB_DIRECT_PORT || '5432';
+                    const localUser = process.env.DB_USER || 'cascata_admin';
+                    const localPass = process.env.DB_PASS || 'secure_pass';
+                    const localConnStr = `postgresql://${localUser}:${localPass}@${localHost}:${localPort}/${dbName}`;
+
+                    console.log(`[Admin] Piping data... (This may take a while)`);
+                    
+                    try {
+                        await new Promise<void>((resolve, reject) => {
+                            // pg_dump (Local) | psql (Remote)
+                            // Usamos --data-only pois o initProjectDb já criou a estrutura base com segurança.
+                            // Mas para garantir sequences e triggers customizados, usamos --schema-only depois data-only, ou full.
+                            // Melhor estratégia para compatibilidade total: Dump completo excluindo ownerships.
+                            
+                            const dumpProc = spawn('pg_dump', [
+                                '--dbname', localConnStr,
+                                '--no-owner',
+                                '--no-acl',
+                                '--data-only', // A estrutura já foi garantida pelo initProjectDb para ser compatível com o Cascata
+                                '--disable-triggers' // Importante para velocidade e integridade
+                            ]);
+
+                            const restoreProc = spawn('psql', [
+                                '--dbname', metadata.external_db_url,
+                                '-v', 'ON_ERROR_STOP=1'
+                            ]);
+
+                            // Pipe: Dump Stdout -> Restore Stdin
+                            dumpProc.stdout.pipe(restoreProc.stdin);
+
+                            // Error Handling
+                            let dumpError = '';
+                            let restoreError = '';
+
+                            dumpProc.stderr.on('data', d => { dumpError += d.toString(); });
+                            restoreProc.stderr.on('data', d => { restoreError += d.toString(); });
+
+                            dumpProc.on('close', (code) => {
+                                if (code !== 0) console.warn(`[Migration] Dump warning (code ${code}): ${dumpError}`);
+                            });
+
+                            restoreProc.on('close', (code) => {
+                                if (code === 0) {
+                                    resolve();
+                                } else {
+                                    console.error(`[Migration] Restore failed: ${restoreError}`);
+                                    reject(new Error(`Restore failed: ${restoreError}`));
+                                }
+                            });
+                            
+                            restoreProc.stdin.on('error', (err) => {
+                                // Ignora erros de pipe fechado se o processo morrer
+                            });
+                        });
+                        console.log(`[Admin] ✅ Data Migration Completed Successfully.`);
+                    } catch (migrationErr: any) {
+                        console.error(`[Admin] Migration Aborted: ${migrationErr.message}`);
+                        return res.status(500).json({ error: `Data Migration Failed: ${migrationErr.message}. The external database might be in inconsistent state.` });
+                    }
+                }
+            }
+            // ------------------------------------
+
             const fields = [];
             const values = [];
             let idx = 1;
@@ -109,13 +204,16 @@ export class AdminController {
             if (fields.length === 0) return res.json({});
             fields.push(`updated_at = now()`);
             values.push(req.params.slug); 
+            
             const query = `UPDATE system.projects SET ${fields.join(', ')} WHERE slug = $${idx} RETURNING *`;
             const result = await systemPool.query(query, values);
             const updatedProject = result.rows[0];
-            if (metadata?.db_config) {
-                await PoolService.reload(updatedProject.db_name);
-            }
+            
+            // Reload Services
+            await PoolService.reload(updatedProject.db_name);
+            RealtimeService.teardownProjectListener(updatedProject.slug); // Força reconexão no novo banco
             await CertificateService.rebuildNginxConfigs(systemPool);
+            
             res.json(updatedProject);
         } catch (e: any) { next(e); }
     }
@@ -126,8 +224,15 @@ export class AdminController {
         try {
             const project = (await systemPool.query('SELECT * FROM system.projects WHERE slug = $1', [slug])).rows[0];
             if (!project) return res.status(404).json({ error: 'Not found' });
+            
             await PoolService.close(project.db_name);
-            await systemPool.query(`DROP DATABASE IF EXISTS "${project.db_name}"`);
+            RealtimeService.teardownProjectListener(slug);
+
+            // Apenas deleta o banco se for local (não deletamos RDS de clientes)
+            if (!project.metadata?.external_db_url) {
+                await systemPool.query(`DROP DATABASE IF EXISTS "${project.db_name}"`);
+            }
+
             await Promise.all(['projects','assets','webhooks','api_logs','ui_settings','rate_limits','doc_pages','ai_history', 'ai_sessions'].map(t => systemPool.query(`DELETE FROM system.${t} WHERE ${t === 'projects' ? 'slug' : 'project_slug'} = $1`, [slug])));
             const storagePath = path.join(STORAGE_ROOT, slug);
             if (fs.existsSync(storagePath)) fs.rmSync(storagePath, { recursive: true, force: true });
@@ -178,8 +283,11 @@ export class AdminController {
             const project = (await systemPool.query('SELECT * FROM system.projects WHERE slug = $1', [req.params.slug])).rows[0];
             if (!project) return res.status(404).json({ error: 'Project not found' });
             
-            // CORREÇÃO: Removemos o argumento 'systemPool' que não é aceito pelo streamExport
-            await BackupService.streamExport(project, res);
+            // Decrypt keys for manifest
+            const keys = (await systemPool.query(`SELECT pgp_sym_decrypt(jwt_secret::bytea, $2) as jwt_secret, pgp_sym_decrypt(anon_key::bytea, $2) as anon_key, pgp_sym_decrypt(service_key::bytea, $2) as service_key FROM system.projects WHERE slug = $1`, [req.params.slug, SYS_SECRET])).rows[0];
+            
+            const projectData = { ...project, ...keys };
+            await BackupService.streamExport(projectData, res);
         } catch (e: any) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
     }
 

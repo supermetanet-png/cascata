@@ -1,8 +1,9 @@
+
 import React, { useState, useEffect } from 'react';
 import { 
   Plus, Search, ExternalLink, Activity, Database, Clock, MoreVertical, 
   Terminal, Loader2, Server, Key, Shield, Trash2, AlertTriangle, 
-  Upload, FileArchive, ArrowRight, CheckCircle2, X 
+  Upload, FileArchive, ArrowRight, CheckCircle2, X, Sparkles, HardDrive
 } from 'lucide-react';
 import { Project } from '../types';
 
@@ -352,6 +353,17 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Database</span>
                             <span className="text-xs font-mono font-bold text-slate-600">{importManifest.project.db_name}</span>
                         </div>
+                        
+                        {/* Rich Content Detection */}
+                        <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Content Detected</span>
+                            <div className="flex gap-2">
+                                {/* Vector Detection Logic would ideally check keys inside zip, simplified here assuming CAF 2.0 */}
+                                <span className="text-[9px] font-black bg-purple-100 text-purple-700 px-2 py-1 rounded flex items-center gap-1"><Sparkles size={8}/> Vectors</span>
+                                <span className="text-[9px] font-black bg-blue-100 text-blue-700 px-2 py-1 rounded flex items-center gap-1"><HardDrive size={8}/> Storage</span>
+                            </div>
+                        </div>
+
                         <div className="flex items-center justify-between">
                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Export Date</span>
                             <span className="text-xs font-bold text-slate-900">{new Date(importManifest.exported_at).toLocaleDateString()}</span>

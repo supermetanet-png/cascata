@@ -244,7 +244,7 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
       
       const metaUpdate: any = { 
           db_config: dbConfig,
-          // BYOD FIELDS: Logic handled in core.ts (middleware)
+          // BYOD FIELDS: Logic handled in core.ts (middleware) and AdminController (for migration)
           external_db_url: isEjected ? externalDbUrl : null,
           read_replica_url: isEjected && readReplicaUrl ? readReplicaUrl : null
       };
@@ -261,11 +261,11 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
       
       if (!res.ok) throw new Error((await res.json()).error);
 
-      setSuccess('Configuração salva.');
+      setSuccess('Configuração salva. Migração de dados (se necessária) concluída.');
       if (!overrideOrigins) fetchProject(); 
       setTimeout(() => setSuccess(null), 3000);
     } catch (e: any) { 
-        alert(e.message || 'Erro ao salvar.'); 
+        alert(e.message || 'Erro ao salvar/migrar.'); 
     } finally { 
         setSaving(false); 
     }
@@ -489,7 +489,7 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
                     <div className="flex gap-4 items-center bg-indigo-100/50 p-4 rounded-2xl border border-indigo-100">
                         <AlertTriangle className="text-indigo-500 shrink-0" size={20}/>
                         <p className="text-xs text-indigo-800 font-medium leading-relaxed">
-                            <strong>Atenção:</strong> Backups automáticos do sistema (snapshots) <u>não cobrem bancos externos</u>. Você é responsável pelo backup do seu RDS/VPS. A latência pode aumentar se o banco estiver longe geograficamente.
+                            <strong>Atenção:</strong> Ao clicar em Migrar, o Cascata copiará automaticamente os dados do banco local para o novo destino (Streaming Pipe). O sistema pode ficar em "Manutenção" durante a transferência.
                         </p>
                     </div>
 
@@ -499,7 +499,8 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
                             disabled={saving || !externalDbUrl} 
                             className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-xl flex items-center gap-2"
                         >
-                            {saving ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16}/>} Test Connection & Migrate
+                            {saving ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16}/>} 
+                            {saving ? 'Cloning Database...' : 'Test Connection & Migrate Data'}
                         </button>
                     </div>
                 </div>

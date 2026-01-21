@@ -1,12 +1,12 @@
 
- 
-		cd ~/cascata
-		sudo docker compose down -v
+	
+			cd ~/cascata
+			sudo docker compose down -v
 
-		sudo docker system prune -a --volumes -f
+			sudo docker system prune -a --volumes -f
 
-		cd ~
-		rm -rf cascata
+			cd ~
+			rm -rf cascata
 
-		sudo docker ps -a	 
-		
+			sudo docker ps -a	 
+			

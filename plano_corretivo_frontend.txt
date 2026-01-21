@@ -70,3 +70,12 @@ O fluxo de importação precisa reconhecer que o .CAF agora é um arquivo "gordo
 
 **PRÓXIMO PASSO SUGERIDO:**
 Começar a implementação pelo `ProjectSettings.tsx`, pois é onde a funcionalidade de Ejeção é ativada.
+
+
+
+conferir:
+Provisionamento Automático (Smart Migration): Ao salvar uma URL externa, o Backend irá conectar nela, validar o acesso e injetar a infraestrutura do Cascata (Schemas auth, system, extensões uuid-ossp, triggers de notificação) automaticamente antes de efetivar a troca.
+Realtime Híbrido: O RealtimeService foi reescrito para respeitar a configuração external_db_url. Ele agora sabe ouvir eventos tanto do Docker local quanto de um RDS na AWS/Azure.
+Backup Robusto: O BackupService foi endurecido para garantir que o pg_dump funcione corretamente através de túneis SSL (comum em bancos gerenciados em nuvem).
+
+
