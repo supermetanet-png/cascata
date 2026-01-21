@@ -1,4 +1,4 @@
-import { NextFunction, Response } from 'express';
+import { NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
@@ -177,9 +177,7 @@ export class AdminController {
         try {
             const project = (await systemPool.query('SELECT * FROM system.projects WHERE slug = $1', [req.params.slug])).rows[0];
             if (!project) return res.status(404).json({ error: 'Project not found' });
-            
-            // CORREÇÃO: Removemos o argumento 'systemPool' que não é aceito pelo streamExport
-            await BackupService.streamExport(project, res);
+            await BackupService.streamExport(project, systemPool, res);
         } catch (e: any) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
     }
 

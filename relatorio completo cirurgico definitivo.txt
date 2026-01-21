@@ -1,96 +1,126 @@
-RELATÓRIO DE AUDITORIA TÉCNICA E SEGURANÇA - CASCATA (INFRAESTRUTURA)
-DATA: 12/07/2026 (Simulado)
-ESCOPO: Cascata BaaS (Control Plane, Data Plane, Docker, Nginx, Segurança)
-CLASSIFICAÇÃO: CRÍTICO/ESTRUTURAL
+# RELATÓRIO DE AUDITORIA TÉCNICA E SEGURANÇA - CASCATA (INFRAESTRUTURA E ESCALA DE ELITE)
+
+**DATA:** 21/01/2026  
+**ESCOPO:** Cascata BaaS (Control Plane, Data Plane, Docker, Nginx, Segurança)  
+**CLASSIFICAÇÃO:** CRÍTICO/ESTRUTURAL
 
 Este documento analisa a integridade do orquestrador Cascata, ignorando lógicas de negócio externas (Cheshire) e focando na robustez da plataforma como serviço.
 
-==============================================================================
-1. RISCOS DE SEGURANÇA (HARDENING)
-==============================================================================
+---
 
-1.1. Vulnerabilidade de "Senha de Fallback" em Produção (AdminController.ts)
-   - Diagnóstico: O método `login` verifica se a senha não começa com `$2` (bcrypt) e, se for o caso, compara em texto plano.
-   - Impacto: Se o banco de dados `cascata_system` vazar (ex: via backup inseguro ou erro de configuração do Postgres), a senha de administrador estará legível em texto claro até que o primeiro login ocorra e faça o hash.
-   - Recomendação: O seed inicial já deve inserir o hash bcrypt, nunca texto plano. Eliminar a lógica de fallback.
+## 📋 GARGALOS ARQUITETURAIS (ESCALABILIDADE)
 
-1.2. Bypass de CORS via "Trusted Builders" (security.ts)
-   - Diagnóstico: A lista `TRUSTED_BUILDERS` permite origens como `editor.swagger.io` e `flutterflow.io`.
-   - Risco: Um atacante pode hospedar uma aplicação maliciosa no FlutterFlow (que compartilha o domínio de origem) e usar as credenciais (cookies/sessão) de um usuário logado no Cascata para fazer requisições autenticadas (CSRF), pois o backend confia na origem `flutterflow.io` cegamente.
-   - Status: Risco Alto para um BaaS público.
+### 2.1. Modelo de Conexão "Pool-per-Project" (PoolService.ts)
 
-1.3. Exposição de Métricas de Infraestrutura (health check)
-   - Diagnóstico: A rota `GET /health` retorna `memory: process.memoryUsage()` e `uptime`.
-   - Impacto: Information Disclosure. Embora pareça inofensivo, padrões de uso de memória podem ajudar atacantes a detectar vulnerabilidades de DoS ou identificar a tecnologia subjacente para ataques direcionados. Em produção, health checks devem retornar apenas `status: ok` ou códigos HTTP 200/500.
+**Diagnóstico:** O `PoolService` cria uma nova instância de `pg.Pool` para *cada projeto* acessado.
 
-1.4. Injeção de SQL via Ordenação (PostgrestService.ts)
-   - Diagnóstico: No método `parseOrder`, o código faz split por `.` e depois `replace(/"/g, '')`.
-   - Risco: Embora haja uma tentativa de sanitização, a construção dinâmica de `ORDER BY` sem whitelist estrita de colunas é historicamente frágil em drivers SQL. Se um atacante conseguir injetar uma subquery no `orderParam` que passe pelo replace, pode haver Blind SQL Injection.
+**Problema:** Em uma arquitetura BaaS com 500 projetos, o Node.js tentará manter 500 pools abertos (mesmo que ociosos). Mesmo com o "Reaper" (coletor de lixo), picos de tráfego em múltiplos projetos causarão exaustão de descritores de arquivo (file descriptors) e memória RAM no container `backend_data`, derrubando o orquestrador antes que o banco de dados sofra.
 
-==============================================================================
-2. GARGALOS ARQUITETURAIS (ESCALABILIDADE)
-==============================================================================
+**Solução Ideal:** O Node.js deveria usar uma única pool dinâmica ou delegar 100% do pooling para o PgBouncer, trocando o banco de dados via comando SQL `SET SESSION AUTHORIZATION` ou roteamento dinâmico na string de conexão apenas no momento da query, sem manter objetos Pool persistentes na memória da aplicação.
 
-2.1. Modelo de Conexão "Pool-per-Project" (PoolService.ts)
-   - Diagnóstico: O `PoolService` cria uma nova instância de `pg.Pool` para *cada projeto* acessado.
-   - Problema: Em uma arquitetura BaaS com 500 projetos, o Node.js tentará manter 500 pools abertos (mesmo que ociosos). Mesmo com o "Reaper" (coletor de lixo), picos de tráfego em múltiplos projetos causarão exaustão de descritores de arquivo (file descriptors) e memória RAM no container `backend_data`, derrubando o orquestrador antes que o banco de dados sofra.
-   - Solução Ideal: O Node.js deveria usar uma única pool dinâmica ou delegar 100% do pooling para o PgBouncer, trocando o banco de dados via comando SQL `SET SESSION AUTHORIZATION` ou roteamento dinâmico na string de conexão apenas no momento da query, sem manter objetos Pool persistentes na memória da aplicação.
+### 2.2. Single Point of Failure no "Control Plane"
 
-2.2. Single Point of Failure no "Control Plane"
-   - Diagnóstico: O `QueueService` (BullMQ) roda dentro do processo do `backend_control`.
-   - Impacto: Se o processamento de um Webhook pesado ou uma tarefa de backup travar a event loop do Node.js no Control Plane, a API de gerenciamento (criar projetos, login) ficará indisponível. Workers devem rodar em processos isolados ou containers dedicados.
+**Diagnóstico:** O `QueueService` (BullMQ) roda dentro do processo do `backend_control`.
 
-==============================================================================
-3. DÍVIDA TÉCNICA E PONTAS SOLTAS
-==============================================================================
+**Impacto:** Se o processamento de um Webhook pesado ou uma tarefa de backup travar a event loop do Node.js no Control Plane, a API de gerenciamento (criar projetos, login) ficará indisponível. Workers devem rodar em processos isolados ou containers dedicados.
 
-3.1. Migração 014 (Cheshire) no Lugar Errado
-   - Diagnóstico: O arquivo `014_cheshire_memory.sql` (que define tabelas de negócio como `memories`, `graph_nodes`) está na pasta de migrações do *Sistema* (`backend/migrations`).
-   - Erro Conceitual: O Cascata é a infraestrutura. O Cheshire é o cliente. Ao colocar a migração 014 no boot do sistema, você está criando tabelas de um aplicativo específico dentro do banco de dados administrativo `cascata_system`. Isso viola o isolamento multi-tenant. Essas tabelas deveriam ser criadas apenas dentro do banco do projeto do usuário (`cascata_proj_...`), não no banco do orquestrador.
+---
 
-3.2. Tipagem "Any" Excessiva
-   - Diagnóstico: Controladores como `DataController.ts` usam `(req: CascataRequest, res: any, next: any)`.
-   - Impacto: Perda total dos benefícios do TypeScript. Refatorações futuras serão perigosas pois o compilador não detectará mudanças em objetos `res` ou `req.body`.
+## 🔧 DÍVIDA TÉCNICA E PONTAS SOLTAS
 
-==============================================================================
-4. ANÁLISE DE MIGRAÇÃO DE STACK (BUN & DRAGONFLYDB)
-==============================================================================
 
-Abaixo, a análise técnica da substituição das tecnologias atuais.
+### 3.2. Tipagem "Any" Excessiva
 
-### 4.1. NODE.JS -> BUN
-**Veredito: ALTO RISCO (Incompatibilidade Crítica com `isolated-vm`)**
+**Diagnóstico:** Controladores como `DataController.ts` usam `(req: CascataRequest, res: any, next: any)`.
 
-1.  **O Bloqueador Principal:** O projeto utiliza `isolated-vm` para rodar Edge Functions (código do usuário) de forma segura.
-    -   O `isolated-vm` é um módulo nativo C++ profundamente atrelado à API V8 do Node.js.
-    -   O Bun utiliza JavaScriptCore (engine do Safari), não V8.
-    -   **Consequência:** O `isolated-vm` **não funciona** no Bun. Você teria que reescrever toda a camada de `EdgeService.ts` usando outra tecnologia de sandbox (ex: WASM ou denoland/deno embarcado), o que seria uma reengenharia massiva.
+**Impacto:** Perda total dos benefícios do TypeScript. Refatorações futuras serão perigosas pois o compilador não detectará mudanças em objetos `res` ou `req.body`.
 
-2.  **Benefícios Teóricos (Se não houvesse isolated-vm):**
-    -   Startup time instantâneo (ótimo para scale-to-zero).
-    -   Performance HTTP 3x superior ao Express.
-    -   Tooling unificado (sem `tsx`, `nodemon`, `jest`).
+---
 
-3.  **Recomendação:** Mantenha Node.js 20+ ou 22. A dependência de sandbox de segurança (`isolated-vm`) torna o Bun inviável neste momento para este projeto específico.
-
-### 4.2. REDIS -> DRAGONFLYDB
-**Veredito: ALTAMENTE RECOMENDADO (Ganho Imediato)**
-
-1.  **Compatibilidade:** O DragonflyDB é 100% compatível com o protocolo Redis (RESP). O `ioredis` e `bullmq` usados no projeto funcionarão sem alteração de código.
-2.  **Benefícios para o Cascata:**
-    -   **Arquitetura Multi-Threaded:** O Redis é single-threaded. O Dragonfly usa todos os núcleos da VPS. Para um orquestrador que usa filas (BullMQ) intensamente para Webhooks e Rate Limiting global, isso elimina o gargalo de CPU do Redis.
-    -   **Snapshotting Eficiente:** O Dragonfly faz snapshots (.rdb) muito mais rápidos, reduzindo o "tranco" no sistema durante backups.
-    -   **Sem Complexidade de Cluster:** Você consegue a performance de um Redis Cluster usando uma única instância do Dragonfly (mais simples de manter no Docker Compose).
-
-3.  **Ação Necessária:** Basta alterar a imagem no `docker-compose.yml` de `redis:7-alpine` para `dragonflydb/dragonfly` e ajustar a porta/comando se necessário.
-
-==============================================================================
-CONCLUSÃO DO AUDITOR
-==============================================================================
-
-O Cascata possui uma arquitetura sólida de orquestração, mas sofre de "acoplamento de lógica de negócio na infraestrutura" (migração 014) e um modelo de gestão de conexões PostgreSQL que não escalará além de algumas dezenas de projetos ativos simultaneamente sem refatoração do `PoolService`.
+## ⚠️ CONCLUSÃO DO AUDITOR
 
 A segurança tem falhas pontuais (Admin password, CORS) que precisam ser corrigidas antes de um deploy público.
 
-A migração para **Bun** é desaconselhada devido ao `isolated-vm`.
-A migração para **DragonflyDB** é fortemente aconselhada para performance de filas e cache.
+---
+
+---
+
+# RELATÓRIO ESTRATÉGICO: ESCALABILIDADE DE ELITE E PERFORMANCE (CASCATA)
+
+**DATA:** 21/01/2026  
+**ALVO:** Arquitetura de Longo Prazo e Gestão de "Whales" (Projetos Gigantes)  
+**AUTOR:** Engenheiro Senior Solo Leveling
+
+Este documento daqui para frente ignora o código atual e foca na estratégia de sobrevivência e crescimento. Ele responde como o Cascata deve se comportar quando um projeto hospedado se torna maior que a própria infraestrutura que o hospeda.
+
+---
+
+## 🎯 FASE 1: ESCALABILIDADE DE ARMAZENAMENTO
+
+### Objetivo
+Alterar a lógica de criação de pools (PoolService) para aceitar, opcionalmente, uma string de conexão externa (postgres://...) em vez de assumir sempre o banco local. Isso permite o "Project Ejection".
+
+### 1.1. A FALÁCIA DO "BANCO DISTRIBUÍDO" (E A SOLUÇÃO REAL)
+
+Você mencionou a complexidade de bancos distribuídos (Sharding, CockroachDB, TiDB). O mercado muitas vezes vende isso como a solução mágica, mas para um BaaS focado em PostgreSQL e compatibilidade, isso é uma armadilha.
+
+**O Problema:** Ferramentas como FlutterFlow, Supabase Client e ORMs (Prisma, TypeORM) esperam um PostgreSQL padrão. Bancos distribuídos frequentemente têm limitações em joins, foreign keys ou stored procedures, o que quebraria a promessa do Cascata de ser "compatível com tudo".
+
+**A Solução Real:** "BYOD" (Bring Your Own Database) e Desacoplamento
+
+### 1.2. O Conceito de "Ejeção de Projeto" (Project Ejection)
+
+Atualmente, o Cascata assume que o banco do projeto vive no container db local. Para escalar infinitamente, devemos atualizar a arquitetura para suportar o seguinte fluxo de vida de um projeto gigante:
+
+**Fase Incubadora (Atual):** O projeto nasce no banco compartilhado do Cascata. Custo baixo, performance compartilhada.
+
+**Fase de Crescimento (Detachment):** O projeto cresce. O dono contrata um RDS na AWS, um Google Cloud SQL, ou sobe uma VPS dedicada parruda só com Postgres.
+
+**A Ejeção:**
+- O Cascata realiza um pg_dump e restaura os dados nesse novo banco externo.
+- No painel do Cascata, alteramos a configuração do projeto de "local" para "remote_connection_string".
+
+**O Resultado:**
+- O Data Plane (API) do Cascata continua recebendo as requisições (mantendo os domínios, SSL, Logs e Autenticação funcionando).
+- O Processamento de Dados (Query SQL) acontece no servidor externo gigante.
+- O Cascata vira um "API Gateway Inteligente" para esse banco externo.
+
+**Veredito de Escalabilidade:** Não tente implementar sharding dentro do Cascata. Implemente a capacidade do Cascata se conectar a bancos externos. Isso resolve 100% dos problemas de disco/CPU de banco sem reescrever o motor do sistema.
+
+### 1.3. LOAD BALANCING E LEITURA/ESCRITA (READ REPLICAS)
+
+Você mencionou ter uma VPS para criar/editar (Write) e outra para ler (Read). Isso é clássico e o Cascata já tem a fundação para isso via PgBouncer, mas precisa ser exposto.
+
+**Como atualizar o projeto para isso:**
+
+Em vez de reinventar a roda, devemos usar o padrão de Connection Strings Separadas.
+
+No futuro ProjectSettings, podemos ter dois campos de conexão com o banco:
+- **Database URL (Write):** Aponta para o Líder (Master).
+- **Read Replica URL:** Aponta para uma réplica de leitura.
+
+O DataController.ts (nosso motor de API) seria atualizado para:
+- **Requisições GET:** Usam o pool da Read Replica URL.
+- **Requisições POST/PATCH/DELETE:** Usam o pool da Database URL.
+
+**Conclusão:** Isso deve ser resolvido na camada de Configuração do Projeto, permitindo que o usuário insira URLs diferentes se ele tiver uma infraestrutura complexa. O Cascata apenas roteia.
+
+---
+
+## 🚀 FASE 2: SOBERANIA REAL
+
+### Objetivo
+Refinar o .CAF para incluir não só o SQL, mas os arquivos físicos do Storage (S3/Local) e o snapshot do Qdrant, garantindo que a migração de VPS seja um processo de "um clique".
+
+### 2.1. ESTRATÉGIA DE MIGRAÇÃO TOTAL (MIGRAÇÃO DE MÁQUINA)
+
+Se o cliente quiser sair totalmente da sua infraestrutura (não apenas o banco, mas a API também) para uma VPS dele, o formato .CAF (Cascata Archive Format) que desenhamos é a chave, mas precisa de um complemento: o "Cascata Federation".
+
+**O processo ideal para "migrar de empresa" seria:**
+
+1. **Exportação Soberana:** O cliente baixa o .CAF (que contém Schema + Dados + Storage + Vetores).
+2. **Instalação Limpa:** Ele sobe uma instância nova do Cascata na nova VPS (usando o Docker Compose padrão).
+3. **Hidratação:** Ele faz o upload do .CAF na nova instância.
+4. **DNS Switch:** Ele aponta o domínio api.projeto.com para o IP da nova VPS.
+
+**O que falta hoje:** O Cascata precisa garantir que o .CAF seja "byte-perfect". Se o cliente restaurar o backup em outra máquina, os JWTs antigos devem continuar funcionando (mesmo JWT_SECRET), os arquivos devem estar lá e os IDs vetoriais devem bater. Se garantirmos isso, a escalabilidade via migração torna-se trivial.

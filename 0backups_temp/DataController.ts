@@ -1,4 +1,4 @@
-import { NextFunction, Response } from 'express';
+import { NextFunction } from 'express';
 import { CascataRequest } from '../types.js';
 import { queryWithRLS, quoteId } from '../utils/index.js';
 import { DatabaseService } from '../../services/DatabaseService.js';
@@ -10,9 +10,9 @@ export class DataController {
 
     // --- DATA OPERATIONS ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async listTables(req: CascataRequest, res: any, next: any) {
         try {
-            // Usa queryWithRLS que internamente usa req.projectPool
             const result = await queryWithRLS(req, async (client) => {
                 return await client.query(`
                     SELECT table_name as name, table_schema as schema 
@@ -27,6 +27,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async queryRows(req: CascataRequest, res: any, next: any) {
         try {
             if (!req.params.tableName) throw new Error("Table name required");
@@ -40,6 +41,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async insertRows(req: CascataRequest, res: any, next: any) {
         try {
             const safeTable = quoteId(req.params.tableName);
@@ -58,6 +60,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async updateRows(req: CascataRequest, res: any, next: any) {
         try {
             const safeTable = quoteId(req.params.tableName);
@@ -73,6 +76,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async deleteRows(req: CascataRequest, res: any, next: any) {
         try {
             const safeTable = quoteId(req.params.tableName);
@@ -87,6 +91,7 @@ export class DataController {
 
     // --- RPC & FUNCTIONS ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async executeRpc(req: CascataRequest, res: any, next: any) {
         const params = req.body || {};
         const placeholders = Object.keys(params).map((_, i) => `$${i + 1}`).join(', ');
@@ -100,14 +105,15 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async listFunctions(req: CascataRequest, res: any, next: any) {
         try { 
-            // Usa req.projectPool! pois listFunctions é específico do projeto
             const result = await req.projectPool!.query(`SELECT routine_name as name FROM information_schema.routines WHERE routine_schema = 'public' AND routine_name NOT LIKE 'uuid_%' AND routine_name NOT LIKE 'pgp_%'`); 
             res.json(result.rows); 
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async listTriggers(req: CascataRequest, res: any, next: any) {
         try { 
             const result = await req.projectPool!.query("SELECT trigger_name as name FROM information_schema.triggers"); 
@@ -115,6 +121,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getFunctionDefinition(req: CascataRequest, res: any, next: any) {
         try {
             const defResult = await req.projectPool!.query("SELECT pg_get_functiondef(oid) as def FROM pg_proc WHERE proname = $1", [req.params.name]);
@@ -128,6 +135,7 @@ export class DataController {
 
     // --- SCHEMA & METADATA ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getColumns(req: CascataRequest, res: any, next: any) {
         try {
             const result = await req.projectPool!.query(`SELECT column_name as name, data_type as type, is_nullable, column_default as "defaultValue", EXISTS (SELECT 1 FROM information_schema.key_column_usage kcu WHERE kcu.table_name = $1 AND kcu.column_name = c.column_name) as "isPrimaryKey" FROM information_schema.columns c WHERE table_schema = 'public' AND table_name = $1`, [req.params.tableName]);
@@ -135,6 +143,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async runRawQuery(req: CascataRequest, res: any, next: any) {
         if (req.userRole !== 'service_role') { res.status(403).json({ error: 'Only Service Role can execute raw SQL' }); return; }
         try {
@@ -150,6 +159,7 @@ export class DataController {
         }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async createTable(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Only Dashboard can create tables.' }); return; }
         const { name, columns, description } = req.body;
@@ -176,6 +186,7 @@ export class DataController {
 
     // --- RECYCLE BIN & SOFT DELETE ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async deleteTable(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Only Dashboard can delete tables.' }); return; }
         const { mode } = req.body;
@@ -191,6 +202,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async listRecycleBin(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
         try {
@@ -199,6 +211,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async restoreTable(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
         try {
@@ -208,8 +221,9 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
-    // --- SYSTEM ASSETS & SETTINGS (GLOBAL via systemPool) ---
+    // --- SYSTEM ASSETS & SETTINGS ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getUiSettings(req: CascataRequest, res: any, next: any) {
         try { 
             const result = await systemPool.query('SELECT settings FROM system.ui_settings WHERE project_slug = $1 AND table_name = $2', [req.params.slug, req.params.table]); 
@@ -217,6 +231,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async saveUiSettings(req: CascataRequest, res: any, next: any) {
         try { 
             await systemPool.query("INSERT INTO system.ui_settings (project_slug, table_name, settings) VALUES ($1, $2, $3) ON CONFLICT (project_slug, table_name) DO UPDATE SET settings = $3", [req.params.slug, req.params.table, req.body.settings]); 
@@ -224,6 +239,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getAssets(req: CascataRequest, res: any, next: any) {
         try { 
             const result = await systemPool.query('SELECT * FROM system.assets WHERE project_slug = $1', [req.project.slug]); 
@@ -231,6 +247,7 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async upsertAsset(req: CascataRequest, res: any, next: any) {
         const { id, name, type, parent_id, metadata } = req.body;
         try {
@@ -255,15 +272,18 @@ export class DataController {
         } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async deleteAsset(req: CascataRequest, res: any, next: any) {
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) return res.json({ success: true });
         try { await systemPool.query('DELETE FROM system.assets WHERE id=$1', [req.params.id]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getAssetHistory(req: CascataRequest, res: any, next: any) {
         try { const result = await systemPool.query('SELECT id, created_at, created_by, metadata FROM system.asset_history WHERE asset_id = $1 ORDER BY created_at DESC LIMIT 50', [req.params.id]); res.json(result.rows); } catch (e: any) { next(e); }
     }
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getStats(req: CascataRequest, res: any, next: any) {
         try {
             const [tables, users, size] = await Promise.all([
@@ -277,6 +297,7 @@ export class DataController {
 
     // --- POSTGREST COMPATIBILITY ---
 
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async handlePostgrest(req: CascataRequest, res: any, next: any) {
         if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return next();
         try {
@@ -311,7 +332,7 @@ export class DataController {
     }
 
     // --- SPEC GENERATION ---
-    
+    // Fix: Use any for next parameter to resolve callable signature issues
     static async getOpenApiSpec(req: CascataRequest, res: any, next: any) {
         const r = req as CascataRequest;
 

@@ -1,9 +1,8 @@
 git clone https://github.com/supermetanet-png/cascata.git
 cd ~/cascata
-mkdir -p nginx
 mv .env.txt .env
 mv .dockerignore.txt .dockerignore
-mv nginx.conf.txt nginx/nginx.conf
+mv nginx/nginx.conf.txt nginx/nginx.conf
 mv backend/Dockerfile.txt backend/Dockerfile
 mv database/init.sql.txt database/init.sql
 mv backend/migrations/001_init.sql.txt backend/migrations/001_init.sql

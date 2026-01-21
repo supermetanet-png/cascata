@@ -1,4 +1,3 @@
-
 import { RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
 import pg from 'pg';
@@ -99,15 +98,32 @@ export const resolveProject: RequestHandler = async (req: any, res: any, next: a
 
     r.project = project;
 
+    // --- CONNECTION STRATEGY (Elite Scaling) ---
     try {
       const dbConfig = project.metadata?.db_config || {};
       
+      let targetConnectionString: string | undefined = undefined;
+
+      // 1. External DB Override (Project Ejection)
+      if (project.metadata?.external_db_url) {
+          targetConnectionString = project.metadata.external_db_url;
+      }
+      
+      // 2. Read Replica Splitting (Traffic Offloading)
+      // Se for GET e houver uma réplica de leitura configurada, usa ela.
+      if (req.method === 'GET' && project.metadata?.read_replica_url) {
+          targetConnectionString = project.metadata.read_replica_url;
+      }
+
+      // Inicializa o pool correto (Interno ou Externo)
       r.projectPool = PoolService.get(project.db_name, {
           max: dbConfig.max_connections,
-          idleTimeoutMillis: dbConfig.idle_timeout_seconds ? dbConfig.idle_timeout_seconds * 1000 : undefined
+          idleTimeoutMillis: dbConfig.idle_timeout_seconds ? dbConfig.idle_timeout_seconds * 1000 : undefined,
+          connectionString: targetConnectionString // Se undefined, usa lógica padrão interna
       });
       
     } catch (err) {
+      console.error(`[ProjectResolution] DB Connect Error for ${project.slug}:`, err);
       res.status(502).json({ error: 'Database Connection Failed' });
       return;
     }

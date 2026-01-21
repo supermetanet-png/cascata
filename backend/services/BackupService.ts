@@ -25,7 +25,8 @@ interface TableDefinition {
 
 export class BackupService {
     
-    public static async streamExport(project: ProjectMetadata, systemPool: Pool, res: any) {
+    // CORREÇÃO: Removido argumento 'systemPool' que não era usado, corrigindo o erro de contagem de argumentos.
+    public static async streamExport(project: ProjectMetadata, res: any) {
         const archive = archiver('zip', { zlib: { level: 9 } });
         const qdrantUrl = `http://${process.env.QDRANT_HOST || 'qdrant'}:${process.env.QDRANT_PORT || '6333'}`;
 
@@ -40,6 +41,10 @@ export class BackupService {
         archive.pipe(res);
 
         try {
+            // CRITICAL ARCHITECTURE RESTORATION:
+            // Detecta se o projeto usa banco local ou externo (Ejected Project)
+            const connectionString = this.resolveConnectionString(project);
+
             // 1. MANIFESTO .CAF 2.0 (Híbrido)
             const manifest = {
                 version: '2.0',
@@ -54,19 +59,21 @@ export class BackupService {
                     service_key: project.service_key,
                     custom_domain: project.custom_domain,
                     // Inclui a matriz de vulto (PCA) se existir no metadata para a VPS 3
-                    semantic_matrix: project.metadata?.semantic_matrix || null 
+                    semantic_matrix: project.metadata?.semantic_matrix || null,
+                    is_ejected: !!project.metadata?.external_db_url
                 }
             };
             archive.append(JSON.stringify(manifest, null, 2), { name: 'manifest.json' });
 
             // 2. CORPO (Estrutura Relacional)
-            const schemaStream = await this.getSchemaDumpStream(project.db_name);
+            // Passamos a connectionString resolvida (seja local ou externa)
+            const schemaStream = await this.getSchemaDumpStream(connectionString);
             archive.append(schemaStream, { name: 'graph/structure.sql' });
 
             // 3. MEMÓRIA ATÔMICA (Dados)
-            const tables = await this.listTables(project.db_name);
+            const tables = await this.listTables(connectionString);
             for (const table of tables) {
-                const tableStream = await this.getTableDataStream(project.db_name, table.schema, table.name);
+                const tableStream = await this.getTableDataStream(connectionString, table.schema, table.name);
                 archive.append(tableStream, { name: `data/${table.schema}.${table.name}.csv` });
             }
 
@@ -92,6 +99,7 @@ export class BackupService {
             }
 
             // 5. ASSETS (Storage)
+            // Nota: Storage externo (S3) não é baixado, apenas referência. Storage local é incluído.
             const projectStoragePath = path.resolve(process.env.STORAGE_ROOT || '../storage', project.slug);
             if (fs.existsSync(projectStoragePath)) {
                 archive.directory(projectStoragePath, 'storage');
@@ -106,16 +114,27 @@ export class BackupService {
         }
     }
 
-    private static getDirectDbUrl(dbName: string): string {
+    /**
+     * Resolve a string de conexão correta.
+     * Prioriza banco externo (Ejected Project) se configurado no metadata.
+     * Esta lógica é vital para escalabilidade horizontal.
+     */
+    private static resolveConnectionString(project: ProjectMetadata): string {
+        if (project.metadata?.external_db_url) {
+            console.log(`[BackupService] Using external DB connection for ${project.slug} (Ejected Mode)`);
+            return project.metadata.external_db_url;
+        }
+
+        // Fallback para infraestrutura local (Docker)
         const host = process.env.DB_DIRECT_HOST || 'db';
         const port = process.env.DB_DIRECT_PORT || '5432';
         const user = process.env.DB_USER || 'cascata_admin';
         const pass = process.env.DB_PASS || 'secure_pass';
-        return `postgresql://${user}:${pass}@${host}:${port}/${dbName}`;
+        return `postgresql://${user}:${pass}@${host}:${port}/${project.db_name}`;
     }
 
-    private static async listTables(dbName: string): Promise<TableDefinition[]> {
-        const pool = new Pool({ connectionString: this.getDirectDbUrl(dbName) });
+    private static async listTables(connectionString: string): Promise<TableDefinition[]> {
+        const pool = new Pool({ connectionString });
         try {
             const res = await pool.query(`
                 SELECT table_schema, table_name 
@@ -130,29 +149,31 @@ export class BackupService {
         }
     }
 
-    private static async getSchemaDumpStream(dbName: string): Promise<Readable> {
-        const env = { ...process.env, PGPASSWORD: process.env.DB_PASS };
-        const host = process.env.DB_DIRECT_HOST || 'db';
-        const port = process.env.DB_DIRECT_PORT || '5432';
+    private static async getSchemaDumpStream(connectionString: string): Promise<Readable> {
+        // pg_dump aceita a connection string diretamente via parâmetro -d ou argumento posicional
+        // Adiciona --no-owner para evitar erros ao importar em bancos gerenciados (RDS/Supabase)
         const child = spawn('pg_dump', [
-            '-h', host, '-p', port,
-            '-U', process.env.DB_USER || 'postgres',
-            '-d', dbName,
-            '--schema-only', '--no-owner', '--no-privileges'
-        ], { env });
+            '--dbname', connectionString,
+            '--schema-only', 
+            '--no-owner', 
+            '--no-privileges'
+        ]);
+        
+        // Log de erro do stderr para debug
+        child.stderr.on('data', (data) => console.error(`[pg_dump error] ${data}`));
+        
         return child.stdout;
     }
 
-    private static async getTableDataStream(dbName: string, schema: string, tableName: string): Promise<Readable> {
-        const env = { ...process.env, PGPASSWORD: process.env.DB_PASS };
-        const host = process.env.DB_DIRECT_HOST || 'db';
-        const port = process.env.DB_DIRECT_PORT || '5432';
+    private static async getTableDataStream(connectionString: string, schema: string, tableName: string): Promise<Readable> {
         const query = `COPY (SELECT * FROM "${schema}"."${tableName}") TO STDOUT WITH CSV HEADER`;
         const child = spawn('psql', [
-            '-h', host, '-p', port,
-            '-U', process.env.DB_USER || 'postgres',
-            '-d', dbName, '-c', query
-        ], { env });
+            '--dbname', connectionString,
+            '-c', query
+        ]);
+        
+        child.stderr.on('data', (data) => console.error(`[psql copy error] ${data}`));
+
         return child.stdout;
     }
 }
