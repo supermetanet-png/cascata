@@ -212,7 +212,13 @@ export class PostgrestService {
         const parts = orderParam.split(',');
         const orders = parts.map(p => {
             const [col, dir] = p.split('.');
-            const safeCol = `"${col.replace(/"/g, '')}"`;
+            
+            // SECURITY FIX: Strict sanitization to prevent SQL Injection.
+            // Allows only alphanumeric chars, underscores, hyphens, and JSON accessors (->, >).
+            // This aggressively removes quotes, semicolons, comments, and other dangerous chars.
+            const cleanCol = col.replace(/[^a-zA-Z0-9_> -]/g, '');
+            const safeCol = `"${cleanCol}"`;
+            
             const safeDir = (dir && dir.toLowerCase() === 'desc') ? 'DESC' : 'ASC';
             // Handle nullsfirst / nullslast
             let nulls = '';

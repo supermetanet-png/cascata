@@ -1,0 +1,96 @@
+RELATÓRIO DE AUDITORIA TÉCNICA E SEGURANÇA - CASCATA (INFRAESTRUTURA)
+DATA: 12/07/2026 (Simulado)
+ESCOPO: Cascata BaaS (Control Plane, Data Plane, Docker, Nginx, Segurança)
+CLASSIFICAÇÃO: CRÍTICO/ESTRUTURAL
+
+Este documento analisa a integridade do orquestrador Cascata, ignorando lógicas de negócio externas (Cheshire) e focando na robustez da plataforma como serviço.
+
+==============================================================================
+1. RISCOS DE SEGURANÇA (HARDENING)
+==============================================================================
+
+1.1. Vulnerabilidade de "Senha de Fallback" em Produção (AdminController.ts)
+   - Diagnóstico: O método `login` verifica se a senha não começa com `$2` (bcrypt) e, se for o caso, compara em texto plano.
+   - Impacto: Se o banco de dados `cascata_system` vazar (ex: via backup inseguro ou erro de configuração do Postgres), a senha de administrador estará legível em texto claro até que o primeiro login ocorra e faça o hash.
+   - Recomendação: O seed inicial já deve inserir o hash bcrypt, nunca texto plano. Eliminar a lógica de fallback.
+
+1.2. Bypass de CORS via "Trusted Builders" (security.ts)
+   - Diagnóstico: A lista `TRUSTED_BUILDERS` permite origens como `editor.swagger.io` e `flutterflow.io`.
+   - Risco: Um atacante pode hospedar uma aplicação maliciosa no FlutterFlow (que compartilha o domínio de origem) e usar as credenciais (cookies/sessão) de um usuário logado no Cascata para fazer requisições autenticadas (CSRF), pois o backend confia na origem `flutterflow.io` cegamente.
+   - Status: Risco Alto para um BaaS público.
+
+1.3. Exposição de Métricas de Infraestrutura (health check)
+   - Diagnóstico: A rota `GET /health` retorna `memory: process.memoryUsage()` e `uptime`.
+   - Impacto: Information Disclosure. Embora pareça inofensivo, padrões de uso de memória podem ajudar atacantes a detectar vulnerabilidades de DoS ou identificar a tecnologia subjacente para ataques direcionados. Em produção, health checks devem retornar apenas `status: ok` ou códigos HTTP 200/500.
+
+1.4. Injeção de SQL via Ordenação (PostgrestService.ts)
+   - Diagnóstico: No método `parseOrder`, o código faz split por `.` e depois `replace(/"/g, '')`.
+   - Risco: Embora haja uma tentativa de sanitização, a construção dinâmica de `ORDER BY` sem whitelist estrita de colunas é historicamente frágil em drivers SQL. Se um atacante conseguir injetar uma subquery no `orderParam` que passe pelo replace, pode haver Blind SQL Injection.
+
+==============================================================================
+2. GARGALOS ARQUITETURAIS (ESCALABILIDADE)
+==============================================================================
+
+2.1. Modelo de Conexão "Pool-per-Project" (PoolService.ts)
+   - Diagnóstico: O `PoolService` cria uma nova instância de `pg.Pool` para *cada projeto* acessado.
+   - Problema: Em uma arquitetura BaaS com 500 projetos, o Node.js tentará manter 500 pools abertos (mesmo que ociosos). Mesmo com o "Reaper" (coletor de lixo), picos de tráfego em múltiplos projetos causarão exaustão de descritores de arquivo (file descriptors) e memória RAM no container `backend_data`, derrubando o orquestrador antes que o banco de dados sofra.
+   - Solução Ideal: O Node.js deveria usar uma única pool dinâmica ou delegar 100% do pooling para o PgBouncer, trocando o banco de dados via comando SQL `SET SESSION AUTHORIZATION` ou roteamento dinâmico na string de conexão apenas no momento da query, sem manter objetos Pool persistentes na memória da aplicação.
+
+2.2. Single Point of Failure no "Control Plane"
+   - Diagnóstico: O `QueueService` (BullMQ) roda dentro do processo do `backend_control`.
+   - Impacto: Se o processamento de um Webhook pesado ou uma tarefa de backup travar a event loop do Node.js no Control Plane, a API de gerenciamento (criar projetos, login) ficará indisponível. Workers devem rodar em processos isolados ou containers dedicados.
+
+==============================================================================
+3. DÍVIDA TÉCNICA E PONTAS SOLTAS
+==============================================================================
+
+3.1. Migração 014 (Cheshire) no Lugar Errado
+   - Diagnóstico: O arquivo `014_cheshire_memory.sql` (que define tabelas de negócio como `memories`, `graph_nodes`) está na pasta de migrações do *Sistema* (`backend/migrations`).
+   - Erro Conceitual: O Cascata é a infraestrutura. O Cheshire é o cliente. Ao colocar a migração 014 no boot do sistema, você está criando tabelas de um aplicativo específico dentro do banco de dados administrativo `cascata_system`. Isso viola o isolamento multi-tenant. Essas tabelas deveriam ser criadas apenas dentro do banco do projeto do usuário (`cascata_proj_...`), não no banco do orquestrador.
+
+3.2. Tipagem "Any" Excessiva
+   - Diagnóstico: Controladores como `DataController.ts` usam `(req: CascataRequest, res: any, next: any)`.
+   - Impacto: Perda total dos benefícios do TypeScript. Refatorações futuras serão perigosas pois o compilador não detectará mudanças em objetos `res` ou `req.body`.
+
+==============================================================================
+4. ANÁLISE DE MIGRAÇÃO DE STACK (BUN & DRAGONFLYDB)
+==============================================================================
+
+Abaixo, a análise técnica da substituição das tecnologias atuais.
+
+### 4.1. NODE.JS -> BUN
+**Veredito: ALTO RISCO (Incompatibilidade Crítica com `isolated-vm`)**
+
+1.  **O Bloqueador Principal:** O projeto utiliza `isolated-vm` para rodar Edge Functions (código do usuário) de forma segura.
+    -   O `isolated-vm` é um módulo nativo C++ profundamente atrelado à API V8 do Node.js.
+    -   O Bun utiliza JavaScriptCore (engine do Safari), não V8.
+    -   **Consequência:** O `isolated-vm` **não funciona** no Bun. Você teria que reescrever toda a camada de `EdgeService.ts` usando outra tecnologia de sandbox (ex: WASM ou denoland/deno embarcado), o que seria uma reengenharia massiva.
+
+2.  **Benefícios Teóricos (Se não houvesse isolated-vm):**
+    -   Startup time instantâneo (ótimo para scale-to-zero).
+    -   Performance HTTP 3x superior ao Express.
+    -   Tooling unificado (sem `tsx`, `nodemon`, `jest`).
+
+3.  **Recomendação:** Mantenha Node.js 20+ ou 22. A dependência de sandbox de segurança (`isolated-vm`) torna o Bun inviável neste momento para este projeto específico.
+
+### 4.2. REDIS -> DRAGONFLYDB
+**Veredito: ALTAMENTE RECOMENDADO (Ganho Imediato)**
+
+1.  **Compatibilidade:** O DragonflyDB é 100% compatível com o protocolo Redis (RESP). O `ioredis` e `bullmq` usados no projeto funcionarão sem alteração de código.
+2.  **Benefícios para o Cascata:**
+    -   **Arquitetura Multi-Threaded:** O Redis é single-threaded. O Dragonfly usa todos os núcleos da VPS. Para um orquestrador que usa filas (BullMQ) intensamente para Webhooks e Rate Limiting global, isso elimina o gargalo de CPU do Redis.
+    -   **Snapshotting Eficiente:** O Dragonfly faz snapshots (.rdb) muito mais rápidos, reduzindo o "tranco" no sistema durante backups.
+    -   **Sem Complexidade de Cluster:** Você consegue a performance de um Redis Cluster usando uma única instância do Dragonfly (mais simples de manter no Docker Compose).
+
+3.  **Ação Necessária:** Basta alterar a imagem no `docker-compose.yml` de `redis:7-alpine` para `dragonflydb/dragonfly` e ajustar a porta/comando se necessário.
+
+==============================================================================
+CONCLUSÃO DO AUDITOR
+==============================================================================
+
+O Cascata possui uma arquitetura sólida de orquestração, mas sofre de "acoplamento de lógica de negócio na infraestrutura" (migração 014) e um modelo de gestão de conexões PostgreSQL que não escalará além de algumas dezenas de projetos ativos simultaneamente sem refatoração do `PoolService`.
+
+A segurança tem falhas pontuais (Admin password, CORS) que precisam ser corrigidas antes de um deploy público.
+
+A migração para **Bun** é desaconselhada devido ao `isolated-vm`.
+A migração para **DragonflyDB** é fortemente aconselhada para performance de filas e cache.

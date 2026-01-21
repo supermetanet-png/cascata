@@ -1,4 +1,4 @@
-it clone https://github.com/supermetanet-png/cascata.git
+git clone https://github.com/supermetanet-png/cascata.git
 cd ~/cascata
 mkdir -p nginx
 mv .env.txt .env
@@ -19,6 +19,7 @@ mv backend/migrations/010_auth_confirmation.sql.txt backend/migrations/010_auth_
 mv backend/migrations/011_webhook_filters.sql.txt backend/migrations/011_webhook_filters.sql
 mv backend/migrations/012_webhook_reliability.sql.txt backend/migrations/012_webhook_reliability.sql
 mv backend/migrations/013_auth_helpers.sql.txt backend/migrations/013_auth_helpers.sql
+MV backend/migrations/014_cheshire_memory.sql.txt backend/migrations/014_cheshire_memory.sql
 mv frontend/Dockerfile.txt frontend/Dockerfile
 mv frontend/nginx.conf.txt frontend/nginx.conf
 mv nginx-controller/Dockerfile.txt nginx-controller/Dockerfile

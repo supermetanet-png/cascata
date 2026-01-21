@@ -23,18 +23,14 @@ export class AdminController {
         try {
             const result = await systemPool.query('SELECT * FROM system.admin_users WHERE email = $1', [email]);
             if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+            
             const admin = result.rows[0];
-            let isValid = false;
-            if (!admin.password_hash.startsWith('$2')) {
-                if (admin.password_hash === password) {
-                    isValid = true;
-                    const newHash = await bcrypt.hash(password, 10);
-                    await systemPool.query('UPDATE system.admin_users SET password_hash = $1 WHERE id = $2', [newHash, admin.id]);
-                }
-            } else {
-                isValid = await bcrypt.compare(password, admin.password_hash);
-            }
+            
+            // SECURITY FIX: Removed plain-text fallback. Only Bcrypt is accepted.
+            const isValid = await bcrypt.compare(password, admin.password_hash);
+            
             if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+            
             const token = jwt.sign({ role: 'admin', sub: admin.id }, SYS_SECRET, { expiresIn: '12h' });
             res.json({ token });
         } catch (e: any) { next(e); }
@@ -43,9 +39,9 @@ export class AdminController {
     static async verify(req: CascataRequest, res: any, next: any) {
         try {
             const user = (await systemPool.query('SELECT * FROM system.admin_users LIMIT 1')).rows[0];
-            let isValid = false;
-            if (!user.password_hash.startsWith('$2')) isValid = user.password_hash === req.body.password;
-            else isValid = await bcrypt.compare(req.body.password, user.password_hash);
+            // SECURITY FIX: Enforce bcrypt comparison
+            const isValid = await bcrypt.compare(req.body.password, user.password_hash);
+            
             if (isValid) res.json({ success: true });
             else res.status(401).json({ error: 'Invalid password' });
         } catch (e: any) { next(e); }

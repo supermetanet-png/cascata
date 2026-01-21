@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS system.admin_users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- SEED SEGURO: Senha nasce hashada (Bcrypt) via pgcrypto
 INSERT INTO system.admin_users (email, password_hash) 
-SELECT 'admin@cascata.io', 'admin123'
+SELECT 'admin@cascata.io', crypt('admin123', gen_salt('bf'))
 WHERE NOT EXISTS (SELECT 1 FROM system.admin_users WHERE email = 'admin@cascata.io');

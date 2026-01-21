@@ -56,11 +56,12 @@ app.use((req, res, next) => {
 });
 
 // --- CORS & HOST GUARD ---
-// Dynamic CORS is applied globally to handle preflights correctly
-app.use(dynamicCors as any);
 
-// Resolve Project Context (Must be before HostGuard for custom domains to work)
+// SECURITY CHANGE: Order Swapped.
+// resolveProject runs FIRST to identify the tenant DB.
+// dynamicCors runs SECOND to check that specific tenant's 'allowed_origins' list.
 app.use(resolveProject as any);
+app.use(dynamicCors as any);
 
 // Host Guard blocks direct IP access or unknown domains (Stealth Mode)
 app.use(hostGuard as any);
@@ -78,8 +79,7 @@ app.get('/health', async (req, res) => {
         status: 'ok', 
         mode: process.env.SERVICE_MODE, 
         system_db: dbStatus,
-        memory: process.memoryUsage(),
-        uptime: process.uptime(),
+        // SECURITY FIX: Removed memory usage and uptime exposure to prevent profiling/fingerprinting.
         time: new Date() 
     }); 
 });
