@@ -1,6 +1,6 @@
 import { Response, Request } from 'express';
 import { Client } from 'pg';
-import { systemPool } from '../config/main.js';
+import { systemPool } from '../src/config/main.js';
 
 interface ClientConnection {
     id: string;

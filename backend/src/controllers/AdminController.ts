@@ -158,11 +158,11 @@ export class AdminController {
                                 '-v', 'ON_ERROR_STOP=1'
                             ]);
 
-                            // STRICT NULL CHECK FIX: Validate streams before piping
+                            // FIX: Strict Null Check for Streams to prevent TS2531
                             if (!dumpProc.stdout || !restoreProc.stdin) {
                                 dumpProc.kill();
                                 restoreProc.kill();
-                                reject(new Error("Failed to initialize process streams (stdout/stdin missing)"));
+                                reject(new Error("Failed to initialize process streams"));
                                 return;
                             }
 

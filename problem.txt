@@ -1,0 +1,144 @@
+[+] up 51/55_
+ ✔ Image nginx:alpine                                       Pulled                                                                                                                                                                       4.8s 
+ ✔ Image qdrant/qdrant:latest                               Pulled                                                                                                                                                                       8.2s 
+ ✔ Image edoburu/pgbouncer:latest                           Pulled                                                                                                                                                                       3.0s 
+ ✔ Image docker.dragonflydb.io/dragonflydb/dragonfly:latest Pulled                                                                                                                                                                       7.5s 
+ ✔ Image postgres:15-alpine                                 Pulled                                                                                                                                                                       9.7s 
+ ⠙ Image cascata-frontend                                   Building                                                                                                                                                                    71.3s 
+ ⠙ Image cascata-backend_control                            Building                                                                                                                                                                    71.3s 
+ ⠙ Image cascata-nginx_controller                           Building                                                                                                                                                                    71.3s 
+ ⠙ Image cascata-backend_data                               Building                                                                                                                                                                    71.3s 
+                                                                                                                                                                                                                                                                                                                                    
+Dockerfile:16
+
+--------------------
+
+  14 |     COPY . .
+
+  15 |     
+
+  16 | >>> RUN npm run build
+
+  17 |     EXPOSE 3000
+
+  18 |     CMD ["node", "dist/server.js"]
+
+--------------------
+
+target backend_control: failed to solve: process "/bin/sh -c npm run build" did not complete successfully: exit code: 2
+
+ubuntu@ip-172-26-7-59:~/cascata$ docker ps
+CONTAINER ID   IMAGE     COMMAND   CREATED   STATUS    PORTS     NAMES
+ubuntu@ip-172-26-7-59:~/cascata$ docker compose build backend_control
+WARN[0000] The "GEMINI_API_KEY" variable is not set. Defaulting to a blank string. 
+WARN[0000] The "GEMINI_API_KEY" variable is not set. Defaulting to a blank string. 
+[+] Building 8.7s (12/12) FINISHED                                                                                                                                                                                                                                                                                                                                                           
+ => [internal] load local bake definitions                                                                                                                                                                                                                                                                                                                                              0.0s
+ => => reading from stdin 995B                                                                                                                                                                                                                                                                                                                                                          0.0s
+ => [internal] load build definition from Dockerfile                                                                                                                                                                                                                                                                                                                                    0.0s
+ => => transferring dockerfile: 550B                                                                                                                                                                                                                                                                                                                                                    0.0s
+ => [internal] load metadata for docker.io/library/node:20-alpine                                                                                                                                                                                                                                                                                                                       0.1s
+ => [internal] load .dockerignore                                                                                                                                                                                                                                                                                                                                                       0.0s
+ => => transferring context: 2B                                                                                                                                                                                                                                                                                                                                                         0.0s
+ => [1/7] FROM docker.io/library/node:20-alpine@sha256:3960ed74dfe320a67bf8da9555b6bade25ebda2b22b6081d2f60fd7d5d430e9c                                                                                                                                                                                                                                                                 0.0s
+ => => resolve docker.io/library/node:20-alpine@sha256:3960ed74dfe320a67bf8da9555b6bade25ebda2b22b6081d2f60fd7d5d430e9c                                                                                                                                                                                                                                                                 0.0s
+ => [internal] load build context                                                                                                                                                                                                                                                                                                                                                       0.0s
+ => => transferring context: 2.63kB                                                                                                                                                                                                                                                                                                                                                     0.0s
+ => CACHED [2/7] WORKDIR /app                                                                                                                                                                                                                                                                                                                                                           0.0s
+ => CACHED [3/7] COPY package*.json ./                                                                                                                                                                                                                                                                                                                                                  0.0s
+ => CACHED [4/7] RUN apk add --no-cache certbot openssl docker-cli postgresql-client python3 make g++                                                                                                                                                                                                                                                                                   0.0s
+ => CACHED [5/7] RUN npm install                                                                                                                                                                                                                                                                                                                                                        0.0s
+ => CACHED [6/7] COPY . .                                                                                                                                                                                                                                                                                                                                                               0.0s
+ => ERROR [7/7] RUN npm run build                                                                                                                                                                                                                                                                                                                                                       8.4s
+------                                                                                                                                                                                                                                                                                                                                                                                       
+ > [7/7] RUN npm run build:                                                                                                                                                                                                                                                                                                                                                                  
+0.343                                                                                                                                                                                                                                                                                                                                                                                        
+0.343 > cascata-backend@1.1.0 build
+0.343 > tsc
+0.343 
+8.278 services/RealtimeService.ts(3,28): error TS2307: Cannot find module '../config/main.js' or its corresponding type declarations.
+------
+[+] build 0/2
+ ⠙ Image cascata-backend_control  Building                                                                                                                                                                                                                                                                                                                                              8.8s 
+ ⠙ Image cascata-nginx_controller Building                                                                                                                                                                                                                                                                                                                                              8.8s 
+Dockerfile:16
+
+--------------------
+
+  14 |     COPY . .
+
+  15 |     
+
+  16 | >>> RUN npm run build
+
+  17 |     EXPOSE 3000
+
+  18 |     CMD ["node", "dist/server.js"]
+
+--------------------
+
+failed to solve: process "/bin/sh -c npm run build" did not complete successfully: exit code: 2
+
+ubuntu@ip-172-26-7-59:~/cascata$ cd backend_control  # ou o diretório correto
+npm run build
+-bash: cd: backend_control: No such file or directory
+Command 'npm' not found, but can be installed with:
+sudo apt install npm
+ubuntu@ip-172-26-7-59:~/cascata$ # No diretório do backend_control
+cat package.json
+{
+  "name": "cascata-orquestrador-baas-production-by-dance",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "lucide-react": "^0.562.0",
+    "jspdf": "^4.0.0",
+    "jspdf-autotable": "^5.0.7",
+    "recharts": "^3.6.0",
+    "express": "^5.2.1",
+    "dotenv": "^17.2.3",
+    "path": "^0.12.7",
+    "url": "^0.11.4",
+    "multer": "^2.0.2",
+    "process": "^0.11.10",
+    "vite": "^7.3.0",
+    "@vitejs/plugin-react": "^5.1.2",
+    "react-dom": "^19.2.3",
+    "archiver": "^7.0.1",
+    "pg": "^8.16.3",
+    "child_process": "^1.0.2",
+    "fs": "^0.0.1-security",
+    "stream": "^0.0.3",
+    "adm-zip": "^0.5.16",
+    "jsonwebtoken": "^9.0.3",
+    "crypto": "^1.0.1",
+    "nodemailer": "^7.0.12",
+    "ioredis": "^5.9.0",
+    "axios": "^1.13.2",
+    "isolated-vm": "^6.0.2",
+    "buffer": "^6.0.3",
+    "bullmq": "^5.66.4",
+    "dns": "^0.2.2",
+    "@google/genai": "^1.34.0",
+    "bcrypt": "^6.0.0",
+    "http": "^0.0.1-security",
+    "@aws-sdk/client-s3": "^3.964.0",
+    "@aws-sdk/s3-request-presigner": "^3.964.0",
+    "form-data": "^4.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+ubuntu@ip-172-26-7-59:~/cascata$ 
+
