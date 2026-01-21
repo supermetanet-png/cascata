@@ -158,6 +158,14 @@ export class AdminController {
                                 '-v', 'ON_ERROR_STOP=1'
                             ]);
 
+                            // STRICT NULL CHECK FIX: Validate streams before piping
+                            if (!dumpProc.stdout || !restoreProc.stdin) {
+                                dumpProc.kill();
+                                restoreProc.kill();
+                                reject(new Error("Failed to initialize process streams (stdout/stdin missing)"));
+                                return;
+                            }
+
                             // Pipe: Dump Stdout -> Restore Stdin
                             dumpProc.stdout.pipe(restoreProc.stdin);
 
@@ -165,14 +173,14 @@ export class AdminController {
                             let dumpError = '';
                             let restoreError = '';
 
-                            dumpProc.stderr.on('data', d => { dumpError += d.toString(); });
-                            restoreProc.stderr.on('data', d => { restoreError += d.toString(); });
+                            dumpProc.stderr.on('data', (d: any) => { dumpError += d.toString(); });
+                            restoreProc.stderr.on('data', (d: any) => { restoreError += d.toString(); });
 
-                            dumpProc.on('close', (code) => {
+                            dumpProc.on('close', (code: number) => {
                                 if (code !== 0) console.warn(`[Migration] Dump warning (code ${code}): ${dumpError}`);
                             });
 
-                            restoreProc.on('close', (code) => {
+                            restoreProc.on('close', (code: number) => {
                                 if (code === 0) {
                                     resolve();
                                 } else {
@@ -181,7 +189,7 @@ export class AdminController {
                                 }
                             });
                             
-                            restoreProc.stdin.on('error', (err) => {
+                            restoreProc.stdin.on('error', (err: any) => {
                                 // Ignora erros de pipe fechado se o processo morrer
                             });
                         });
