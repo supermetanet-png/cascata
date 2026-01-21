@@ -1,4 +1,4 @@
-import { NextFunction, Response } from 'express';
+import { NextFunction } from 'express';
 import { CascataRequest } from '../types.js';
 import { queryWithRLS, quoteId } from '../utils/index.js';
 import { DatabaseService } from '../../services/DatabaseService.js';

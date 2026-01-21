@@ -25,7 +25,6 @@ interface TableDefinition {
 
 export class BackupService {
     
-    // CORREÇÃO: Removido argumento 'systemPool' que não era usado, corrigindo o erro de contagem de argumentos.
     public static async streamExport(project: ProjectMetadata, res: any) {
         const archive = archiver('zip', { zlib: { level: 9 } });
         const qdrantUrl = `http://${process.env.QDRANT_HOST || 'qdrant'}:${process.env.QDRANT_PORT || '6333'}`;
@@ -162,6 +161,10 @@ export class BackupService {
         // Log de erro do stderr para debug
         child.stderr.on('data', (data) => console.error(`[pg_dump error] ${data}`));
         
+        // FIX: Strict Null Check for TypeScript (child.stdout can be null)
+        if (!child.stdout) {
+            throw new Error("pg_dump process failed to spawn stdout stream");
+        }
         return child.stdout;
     }
 
@@ -174,6 +177,10 @@ export class BackupService {
         
         child.stderr.on('data', (data) => console.error(`[psql copy error] ${data}`));
 
+        // FIX: Strict Null Check for TypeScript (child.stdout can be null)
+        if (!child.stdout) {
+            throw new Error("psql process failed to spawn stdout stream");
+        }
         return child.stdout;
     }
 }

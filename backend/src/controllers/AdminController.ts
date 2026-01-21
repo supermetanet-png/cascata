@@ -113,7 +113,7 @@ export class AdminController {
             const result = await systemPool.query(query, values);
             const updatedProject = result.rows[0];
             if (metadata?.db_config) {
-                await PoolService.reload(updatedProject.db_name, { max: metadata.db_config.max_connections });
+                await PoolService.reload(updatedProject.db_name);
             }
             await CertificateService.rebuildNginxConfigs(systemPool);
             res.json(updatedProject);
