@@ -11,7 +11,31 @@ export interface Project {
   ssl_certificate_source?: string;
   anon_key?: string;
   service_key?: string;
-  metadata?: any;
+  metadata?: {
+    db_config?: {
+      max_connections?: number;
+      idle_timeout_seconds?: number;
+      statement_timeout_ms?: number;
+    };
+    // BYOD / Ejection Fields
+    external_db_url?: string;
+    read_replica_url?: string;
+    // Security
+    allowed_origins?: Array<string | { url: string; require_auth: boolean }>;
+    auth_config?: any;
+    auth_strategies?: any;
+    security?: any;
+    // UI
+    ui_settings?: any;
+    schema_exposure?: boolean;
+    // Secrets
+    secrets?: Record<string, string>;
+    linked_tables?: string[];
+    // Storage
+    storage_governance?: any;
+    storage_config?: any;
+    [key: string]: any;
+  };
 }
 
 export interface Table {

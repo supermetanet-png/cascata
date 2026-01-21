@@ -1,0 +1,72 @@
+
+# PLANO DE AÇÃO CORRETIVO E EVOLUTIVO: FRONTEND (v2.0)
+Data: 21/01/2026
+Objetivo: Refletir visualmente a capacidade de "Project Ejection" (Banco Externo) e o novo escopo do .CAF.
+
+---
+
+## 1. PÁGINA: ProjectSettings.tsx (O Coração da Mudança)
+Esta é a área mais crítica. Atualmente, ela foca em "Database Tuning" (limites de conexão). Precisamos transformá-la em "Database Infrastructure Strategy".
+
+### A. Nova Seção: "Database Strategy / Ejection"
+**Estado Atual:** Apenas inputs numéricos para `max_connections`, `idle_timeout`, etc.
+**Ação Necessária:**
+1.  Adicionar um card visualmente distinto (ex: Borda roxa ou destaque "Advanced") chamado **"Bring Your Own Database (BYOD)"**.
+2.  Implementar um **Toggle/Switch**: "Use External Database (Eject Mode)".
+3.  **Campos Condicionais** (aparecem quando o Toggle está ativo):
+    *   Input: `External Connection String` (postgres://user:pass@host:port/db).
+    *   Input: `Read Replica URL` (Opcional - para offload de leitura).
+    *   Botão de Ação: "Test Connection & Migrate" (Visualmente, por enquanto apenas salva a string).
+4.  **Alertas de UX:**
+    *   Aviso de que backups automáticos do sistema (snapshots de disco do container `db`) não cobrem bancos externos (o usuário é responsável pelo backup do RDS/AWS).
+    *   Aviso de que a latência pode aumentar se o banco estiver longe geograficamente da VPS do Cascata.
+
+### B. Atualização: Seção "Data Sovereignty"
+**Estado Atual:** Botão "Download Snapshot (.caf)" com texto genérico.
+**Ação Necessária:**
+1.  Atualizar a cópia (texto) para refletir o **Backup Híbrido**.
+2.  Listar explicitamente o que está incluso no .CAF visualmente (ícones pequenos):
+    *   ✅ SQL Schema & Data
+    *   ✅ Vector Embeddings (Qdrant Snapshot)
+    *   ✅ Storage Files (Local Disk)
+    *   ✅ Semantic Matrix (SVD/PCA)
+
+---
+
+## 2. PÁGINA: ProjectDetail.tsx (Monitoramento)
+O painel de visão geral precisa informar se o projeto está rodando "Local" ou "Ejetado".
+
+### A. Seção: "Infrastructure Manifest"
+**Estado Atual:** Mostra "Database ID" (nome interno do banco).
+**Ação Necessária:**
+1.  Adicionar um **Badge de Status de Infraestrutura**:
+    *   Se `external_db_url` estiver vazio: Badge "Managed (Local)" (Cor Verde/Emerald).
+    *   Se `external_db_url` existir: Badge "Ejected (External)" (Cor Roxa/Indigo).
+2.  Adicionar campo visual "Replica Status":
+    *   Se `read_replica_url` existir: Mostrar "Read Scaling Active".
+
+---
+
+## 3. PÁGINA: Dashboard.tsx (Registry & Import)
+O fluxo de importação precisa reconhecer que o .CAF agora é um arquivo "gordo" (contendo vetores e arquivos).
+
+### A. Modal de Importação (.CAF)
+**Estado Atual:** Upload simples e confirmação.
+**Ação Necessária:**
+1.  Na etapa de "Analyzing Snapshot" (quando o manifesto é lido), adicionar indicadores visuais do conteúdo do backup:
+    *   "Vector Memory Detected" (se o manifesto indicar snapshot do Qdrant).
+    *   "Storage Assets Detected" (se houver pasta storage).
+2.  Isso dá confiança ao usuário de que ele está restaurando a "alma" completa do projeto, não apenas tabelas.
+
+---
+
+## 4. RESUMO TÉCNICO DAS ALTERAÇÕES NO CÓDIGO (PREVISÃO)
+
+1.  **Tipagem (`types.ts`):** Adicionar `external_db_url` e `read_replica_url` à interface `Project`.
+2.  **API Client:** Garantir que o `PATCH /projects/:slug` aceite os novos campos de metadados no body.
+3.  **Validação:** Adicionar Regex simples no frontend para validar formato `postgres://` antes de permitir salvar a configuração externa.
+
+---
+
+**PRÓXIMO PASSO SUGERIDO:**
+Começar a implementação pelo `ProjectSettings.tsx`, pois é onde a funcionalidade de Ejeção é ativada.

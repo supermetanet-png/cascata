@@ -4,7 +4,7 @@ import {
   Shield, Key, Globe, Lock, Save, Loader2, CheckCircle2, Copy, 
   Terminal, Eye, EyeOff, RefreshCw, Code, BookOpen, AlertTriangle,
   Server, ExternalLink, Plus, X, Link, CloudLightning, FileText, Info, Trash2,
-  Archive, Download, Upload, HardDrive, FileJson, Database
+  Archive, Download, Upload, HardDrive, FileJson, Database, Zap, Network, Scale
 } from 'lucide-react';
 
 const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
@@ -23,6 +23,11 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
       idle_timeout_seconds: 60,
       statement_timeout_ms: 15000 // Default 15s
   });
+
+  // BYOD / Ejection State
+  const [isEjected, setIsEjected] = useState(false);
+  const [externalDbUrl, setExternalDbUrl] = useState('');
+  const [readReplicaUrl, setReadReplicaUrl] = useState('');
 
   // Security State
   const [revealedKeyValues, setRevealedKeyValues] = useState<Record<string, string>>({});
@@ -106,6 +111,17 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
                     idle_timeout_seconds: current.metadata.db_config.idle_timeout_seconds || 60,
                     statement_timeout_ms: current.metadata.db_config.statement_timeout_ms || 15000
                 });
+            }
+
+            // Load BYOD State
+            if (current.metadata?.external_db_url) {
+                setIsEjected(true);
+                setExternalDbUrl(current.metadata.external_db_url);
+                setReadReplicaUrl(current.metadata.read_replica_url || '');
+            } else {
+                setIsEjected(false);
+                setExternalDbUrl('');
+                setReadReplicaUrl('');
             }
         }
         
@@ -214,12 +230,27 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
   const handleUpdateSettings = async (overrideOrigins?: any[]) => {
     setSaving(true);
     try {
+      // Validate External DB if ejected
+      if (isEjected) {
+          if (!externalDbUrl.startsWith('postgres://') && !externalDbUrl.startsWith('postgresql://')) {
+              throw new Error("External DB URL must start with postgres:// or postgresql://");
+          }
+          if (readReplicaUrl && !readReplicaUrl.startsWith('postgres')) {
+              throw new Error("Read Replica URL invalid format");
+          }
+      }
+
       const payload: any = { custom_domain: customDomain };
       
-      const metaUpdate: any = { db_config: dbConfig };
+      const metaUpdate: any = { 
+          db_config: dbConfig,
+          // BYOD FIELDS: Logic handled in core.ts (middleware)
+          external_db_url: isEjected ? externalDbUrl : null,
+          read_replica_url: isEjected && readReplicaUrl ? readReplicaUrl : null
+      };
+      
       if (overrideOrigins) metaUpdate.allowed_origins = overrideOrigins;
       
-      // Need to merge with existing metadata properly in backend, but here we just send what changed
       payload.metadata = metaUpdate;
 
       const res = await fetch(`/api/control/projects/${projectId}`, {
@@ -227,12 +258,17 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` },
         body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        setSuccess('Configuração salva.');
-        if (!overrideOrigins) fetchProject(); 
-        setTimeout(() => setSuccess(null), 3000);
-      }
-    } catch (e) { alert('Erro ao salvar.'); } finally { setSaving(false); }
+      
+      if (!res.ok) throw new Error((await res.json()).error);
+
+      setSuccess('Configuração salva.');
+      if (!overrideOrigins) fetchProject(); 
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (e: any) { 
+        alert(e.message || 'Erro ao salvar.'); 
+    } finally { 
+        setSaving(false); 
+    }
   };
 
   const toggleSchemaExposure = async () => {
@@ -313,11 +349,19 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
         
-        {/* DATA SOVEREIGNTY */}
+        {/* DATA SOVEREIGNTY (.CAF) */}
         <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-[3.5rem] p-12 shadow-2xl relative overflow-hidden group">
             <div className="absolute top-0 right-0 p-16 opacity-5 group-hover:scale-110 transition-transform duration-700"><Archive size={200} className="text-white" /></div>
             <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-8">
-                <div><h3 className="text-3xl font-black text-white tracking-tight flex items-center gap-4 mb-2"><div className="w-14 h-14 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-lg"><HardDrive size={24} /></div>Data Sovereignty</h3><p className="text-slate-400 font-medium max-w-xl text-sm leading-relaxed">Full ownership of your infrastructure. Generate a cryptographic snapshot (CAF).</p></div>
+                <div>
+                    <h3 className="text-3xl font-black text-white tracking-tight flex items-center gap-4 mb-2"><div className="w-14 h-14 bg-indigo-600 text-white rounded-2xl flex items-center justify-center shadow-lg"><HardDrive size={24} /></div>Data Sovereignty</h3>
+                    <p className="text-slate-400 font-medium max-w-xl text-sm leading-relaxed mb-4">Full ownership of your infrastructure. Generate a cryptographic snapshot (.CAF) containing your Database, Vectors, and Storage.</p>
+                    <div className="flex gap-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                        <span className="flex items-center gap-2"><div className="w-2 h-2 bg-emerald-500 rounded-full"></div> SQL Schema & Data</span>
+                        <span className="flex items-center gap-2"><div className="w-2 h-2 bg-purple-500 rounded-full"></div> Vector Embeddings (Qdrant)</span>
+                        <span className="flex items-center gap-2"><div className="w-2 h-2 bg-blue-500 rounded-full"></div> Storage Assets</span>
+                    </div>
+                </div>
                 <button onClick={handleDownloadBackup} disabled={exporting} className="bg-white text-slate-900 px-8 py-4 rounded-3xl font-black text-xs uppercase tracking-widest hover:bg-indigo-50 transition-all flex items-center gap-3 shadow-xl active:scale-95 disabled:opacity-70">{exporting ? <Loader2 size={18} className="animate-spin text-indigo-600"/> : <Download size={18} className="text-indigo-600" />}Download Snapshot (.caf)</button>
             </div>
         </div>
@@ -382,58 +426,123 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
            </div>
         </div>
 
-        {/* DATABASE TUNING (NEW CARD) */}
-        <div className="lg:col-span-2 bg-white border border-slate-200 rounded-[3.5rem] p-12 shadow-sm flex flex-col md:flex-row items-center justify-between gap-8">
-            <div className="flex items-center gap-6">
-                <div className="w-14 h-14 bg-blue-50 text-blue-600 rounded-2xl flex items-center justify-center shadow-inner">
-                    <Database size={28} />
+        {/* DATABASE TUNING & EJECTION (ENHANCED) */}
+        <div className={`lg:col-span-2 border rounded-[3.5rem] p-12 shadow-sm relative overflow-hidden transition-all duration-500 ${isEjected ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200'}`}>
+            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-8 mb-8">
+                <div className="flex items-center gap-6">
+                    <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-inner ${isEjected ? 'bg-indigo-600 text-white' : 'bg-blue-50 text-blue-600'}`}>
+                        {isEjected ? <Zap size={28}/> : <Database size={28} />}
+                    </div>
+                    <div>
+                        <h3 className={`text-2xl font-black tracking-tight ${isEjected ? 'text-indigo-900' : 'text-slate-900'}`}>
+                            {isEjected ? 'Bring Your Own Database (BYOD)' : 'Database Strategy'}
+                        </h3>
+                        <p className={`font-medium mt-1 text-sm ${isEjected ? 'text-indigo-700' : 'text-slate-400'}`}>
+                            {isEjected ? 'Project Ejected: Running on external infrastructure.' : 'Managed Mode: Running on internal isolated container.'}
+                        </p>
+                    </div>
                 </div>
-                <div>
-                    <h3 className="text-2xl font-black text-slate-900 tracking-tight">Database Tuning</h3>
-                    <p className="text-slate-400 font-medium mt-1 text-sm max-w-xl">
-                        Optimize the connection pool for this specific tenant.
-                    </p>
+
+                {/* EJECTION TOGGLE */}
+                <div className="flex items-center gap-3 bg-white p-2 rounded-2xl shadow-sm border border-slate-100">
+                    <span className="text-[10px] font-black uppercase tracking-widest pl-2 text-slate-400">Eject Mode</span>
+                    <button 
+                        onClick={() => {
+                            if (isEjected) {
+                                if(!confirm("Deseja reverter para o banco local? Certifique-se de ter migrado os dados de volta.")) return;
+                                setIsEjected(false);
+                                setExternalDbUrl('');
+                            } else {
+                                setIsEjected(true);
+                            }
+                        }}
+                        className={`w-12 h-7 rounded-full p-1 transition-colors ${isEjected ? 'bg-indigo-600' : 'bg-slate-200'}`}
+                    >
+                        <div className={`w-5 h-5 bg-white rounded-full shadow-md transition-transform ${isEjected ? 'translate-x-5' : ''}`}></div>
+                    </button>
                 </div>
             </div>
 
-            <div className="flex gap-4 items-end">
-                <div>
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Max Connections</label>
-                    <input 
-                        type="number" 
-                        min="1"
-                        max="100"
-                        value={dbConfig.max_connections}
-                        onChange={(e) => setDbConfig({...dbConfig, max_connections: parseInt(e.target.value)})}
-                        className="w-24 bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
-                    />
+            {isEjected ? (
+                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="space-y-2">
+                            <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest ml-1">External Connection String (Write)</label>
+                            <input 
+                                value={externalDbUrl}
+                                onChange={(e) => setExternalDbUrl(e.target.value)}
+                                placeholder="postgres://user:pass@host:5432/db"
+                                className="w-full bg-white border border-indigo-200 rounded-2xl py-4 px-6 text-sm font-bold text-indigo-900 outline-none focus:ring-4 focus:ring-indigo-500/10 placeholder:text-indigo-200" 
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-[10px] font-black text-indigo-400 uppercase tracking-widest ml-1">Read Replica URL (Optional)</label>
+                            <input 
+                                value={readReplicaUrl}
+                                onChange={(e) => setReadReplicaUrl(e.target.value)}
+                                placeholder="postgres://user:pass@replica-host:5432/db"
+                                className="w-full bg-white border border-indigo-200 rounded-2xl py-4 px-6 text-sm font-bold text-indigo-900 outline-none focus:ring-4 focus:ring-indigo-500/10 placeholder:text-indigo-200" 
+                            />
+                        </div>
+                    </div>
+                    
+                    <div className="flex gap-4 items-center bg-indigo-100/50 p-4 rounded-2xl border border-indigo-100">
+                        <AlertTriangle className="text-indigo-500 shrink-0" size={20}/>
+                        <p className="text-xs text-indigo-800 font-medium leading-relaxed">
+                            <strong>Atenção:</strong> Backups automáticos do sistema (snapshots) <u>não cobrem bancos externos</u>. Você é responsável pelo backup do seu RDS/VPS. A latência pode aumentar se o banco estiver longe geograficamente.
+                        </p>
+                    </div>
+
+                    <div className="flex justify-end">
+                        <button 
+                            onClick={() => handleUpdateSettings()} 
+                            disabled={saving || !externalDbUrl} 
+                            className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-xl flex items-center gap-2"
+                        >
+                            {saving ? <Loader2 size={16} className="animate-spin"/> : <Zap size={16}/>} Test Connection & Migrate
+                        </button>
+                    </div>
                 </div>
-                <div>
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Idle (s)</label>
-                    <input 
-                        type="number"
-                        min="10"
-                        value={dbConfig.idle_timeout_seconds}
-                        onChange={(e) => setDbConfig({...dbConfig, idle_timeout_seconds: parseInt(e.target.value)})}
-                        className="w-24 bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
-                    />
+            ) : (
+                <div className="flex gap-4 items-end animate-in fade-in">
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Max Connections</label>
+                        <input 
+                            type="number" 
+                            min="1"
+                            max="100"
+                            value={dbConfig.max_connections}
+                            onChange={(e) => setDbConfig({...dbConfig, max_connections: parseInt(e.target.value)})}
+                            className="w-24 bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
+                        />
+                    </div>
+                    <div>
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Idle (s)</label>
+                        <input 
+                            type="number"
+                            min="10"
+                            value={dbConfig.idle_timeout_seconds}
+                            onChange={(e) => setDbConfig({...dbConfig, idle_timeout_seconds: parseInt(e.target.value)})}
+                            className="w-24 bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
+                        />
+                    </div>
+                    <div className="flex-1">
+                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Max Query (ms)</label>
+                        <input 
+                            type="number"
+                            min="1000"
+                            step="1000"
+                            value={dbConfig.statement_timeout_ms}
+                            onChange={(e) => setDbConfig({...dbConfig, statement_timeout_ms: parseInt(e.target.value)})}
+                            className="w-full bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
+                            title="Statement Timeout"
+                        />
+                    </div>
+                    <button onClick={() => handleUpdateSettings()} disabled={saving} className="bg-blue-600 text-white px-6 py-3 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg flex items-center gap-2 h-[46px]">
+                        {saving ? <Loader2 size={14} className="animate-spin"/> : 'Apply'}
+                    </button>
                 </div>
-                <div>
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest ml-1">Max Query (ms)</label>
-                    <input 
-                        type="number"
-                        min="1000"
-                        step="1000"
-                        value={dbConfig.statement_timeout_ms}
-                        onChange={(e) => setDbConfig({...dbConfig, statement_timeout_ms: parseInt(e.target.value)})}
-                        className="w-28 bg-slate-50 border border-slate-100 rounded-2xl py-3 px-4 text-sm font-bold text-center outline-none" 
-                        title="Statement Timeout"
-                    />
-                </div>
-                <button onClick={() => handleUpdateSettings()} disabled={saving} className="bg-blue-600 text-white px-6 py-3 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg flex items-center gap-2 h-[46px]">
-                    {saving ? <Loader2 size={14} className="animate-spin"/> : 'Apply'}
-                </button>
-            </div>
+            )}
         </div>
 
         {/* API SCHEMA DISCOVERY (NEW CARD) */}
