@@ -1,0 +1,27 @@
+Fase 1: Infraestrutura de Identidade (O Catálogo)
+Criar auth.user_devices (User ID <-> FCM Token).
+
+API simples para o App registrar o token (POST /auth/device).
+
+Isso resolve o problema de “quem é quem” sem depender do Firebase Auth.
+
+Fase 2: O Cérebro (Rules Engine)
+Criar tabela system.notification_rules.
+
+trigger_table: “orders”
+
+trigger_event: “INSERT”
+
+condition_sql: “new.status = ‘shipped’”
+
+template: “Seu pedido {id} saiu!”
+
+Implementar um serviço que monitora essas regras (pode ser via Triggers do Postgres enviando para o Redis/BullMQ, ou o Worker monitorando o Replication Log). Triggers PG -> NOTIFY -> Worker Node.js é o mais rápido e “nativo”.
+
+Fase 3: O Transporte (FCM V1 HTTP)
+Usar a API HTTP v1 do FCM (que é a atual e segura).
+
+Suporte a APNs (Apple) através do FCM (para não termos que lidar com certificados .p12 e a insanidade da Apple diretamente neste momento, mantendo a compatibilidade com FlutterFlow que já usa o plugin do Firebase).
+
+
+Demos poder crir o template que quisermos-devemos poder programar notificações tambem com gatilhos diretos como o atualizaçõe de tabela como sugeriu, mas, tbm podemos implementar notiifções mais complexas alem das agendadas tipo um comando sql execute tal rpc tal hora, com os resultados mande tal template para os resultados ou seja um hub bem feito de fato! compativel como mercdo pra notificaçẽos push de qualidade, praticas dde implementar em flutterflow e demais pltaformas.!!

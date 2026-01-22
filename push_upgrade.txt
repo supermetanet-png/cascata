@@ -1,0 +1,64 @@
+🚀 CASCATA PUSH ENGINE (CPE) - ARCHITECTURE BLUEPRINT
+1. A Filosofia: "Native Compatibility Layer"
+O mercado (incluindo FlutterFlow) espera que o backend gerencie os tokens e dispare as mensagens, mas o cliente (app mobile) quase sempre usa a SDK do Firebase para receber.
+O Pulo do Gato: O Cascata não vai substituir o Firebase Cloud Messaging (FCM) como transportadora, ele vai domá-lo. O Cascata será o cérebro que decide "quem recebe o quê e quando", usando o FCM apenas como o "tubo" de entrega. Isso garante compatibilidade zero-config com Apps Flutter/React Native existentes.
+2. Modelagem de Dados (Database Layer)
+Precisamos de uma estrutura relacional robusta para gerenciar dispositivos, não apenas usuários. Um usuário pode ter um iPhone, um iPad e um Android.
+Novos Schemas Sugeridos (PostgreSQL)
+Tabela: auth.user_devices (Relacionamento 1:N com Users)
+Esta tabela é o "catálogo telefônico" dos dispositivos.
+id (UUID)
+user_id (FK para auth.users)
+fcm_token (Text, Unique - O token gerado pelo device)
+device_type (Enum: 'ios', 'android', 'web')
+app_version (Text - útil para segmentação, ex: enviar só para v2.0)
+last_active (Timestamp - para purgar devices mortos)
+is_active (Boolean - Soft delete para logout)
+Tabela: system.notification_history (Log Auditável)
+id, project_slug
+campaign_name (Opcional, para marketing)
+target_count (Quantos devices alvo)
+success_count, failure_count
+content (JSONB - Título, corpo, data payload)
+status ('queued', 'processing', 'completed')
+3. Backend Engine (Node.js/BullMQ)
+O envio de push é uma operação pesada e instável (rede externa). Jamais deve rodar na thread principal do Express.
+A. Integração com Firebase Admin (Service Account)
+No ProjectSettings, criaremos uma área segura para o usuário fazer upload do firebase-service-account.json.
+O Cascata armazena isso encriptado no banco (system.projects.metadata).
+No runtime, o Cascata instancia um agente FCM usando essas credenciais.
+B. O Pipeline de Filas (BullMQ)
+Criaremos uma nova fila dedicada: cascata-push.
+Fluxo Inteligente (Smart Batching):
+API Request: POST /push/send { user_ids: [...], title: "Oi", body: "Tudo bem?" }
+Controller: Valida input, cria registro em notification_history e joga para a fila. Retorna 202 Accepted instantaneamente.
+Worker (The Beast):
+Lê o Job.
+Faz query em auth.user_devices para pegar os tokens dos user_ids.
+Otimização de Elite: Divide os tokens em chunks de 500 (limite do multicast do FCM).
+Dispara em paralelo para o Google.
+Processa as respostas: Se o Google disser "Token Inválido" (usuário desinstalou o app), o Worker automaticamente deleta esse token do banco auth.user_devices. Isso mantém o banco limpo sem intervenção humana (Self-Healing).
+4. Integração com FlutterFlow / Frontend
+Para o FlutterFlow funcionar "nativo", precisamos expor endpoints que ele entenda ou possa ser facilmente adaptado.
+API Endpoints
+POST /rpc/register_device:
+O App chama isso no login ou inicialização.
+Faz "Upsert" na tabela auth.user_devices.
+Atualiza last_active.
+POST /rpc/send_push:
+Para disparos via App (ex: Chat app enviando notificação para outro usuário).
+Implementa lógica de segurança (ex: só pode enviar se for amigo).
+5. Interface Visual (Cascata Dashboard)
+Não adianta ter um motor Ferrari se o painel é de Fusca.
+A. "Push Studio" (Nova Aba no Project Detail)
+Audience Builder: Um construtor visual onde o admin pode filtrar: "Enviar para usuários iOS que não logaram há 30 dias". (Isso usa SQL dinâmico por trás).
+Composer: Preview em tempo real de como a notificação fica no Android e iOS (título, corpo, imagem).
+Magic Variables: Suporte a {{ user.name }} no corpo da mensagem.
+B. Configurador Zero-Config
+Arrastar e soltar o JSON do Firebase.
+O sistema testa a conexão na hora.
+Resumo do Plano de Execução
+Backend (Migration): Criar tabelas user_devices e notification_history.
+Backend (Services): Criar PushService.ts com a lógica de invocar o FCM e o QueueService atualizado.
+Backend (API): Criar rotas de registro de device e envio.
+Frontend (UI): Criar a interface de configuração (Upload JSON) e o disparador manual (Push Studio).

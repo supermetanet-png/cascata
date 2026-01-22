@@ -1,4 +1,6 @@
+
 import pg from 'pg';
+import { Buffer } from 'buffer';
 const { Pool } = pg;
 
 export interface PoolConfig {
@@ -18,7 +20,7 @@ interface PoolEntry {
 }
 
 /**
- * PoolService v4.0 (Elite Scaling Edition)
+ * PoolService v4.2 (Elite Scaling Edition - Stabilized)
  * Suporta:
  * 1. Conexões Internas (PgBouncer)
  * 2. Conexões Externas (Project Ejection / BYOD)
@@ -42,9 +44,13 @@ export class PoolService {
   }
 
   public static initReaper() {
-      setInterval(() => {
+      // Evita múltiplos intervalos se chamado mais de uma vez
+      if ((this as any)._reaperInterval) clearInterval((this as any)._reaperInterval);
+      
+      (this as any)._reaperInterval = setInterval(() => {
           this.reapZombies();
       }, this.REAPER_INTERVAL_MS);
+      
       console.log('[PoolService] Smart Reaper initialized.');
   }
 
@@ -59,10 +65,11 @@ export class PoolService {
       const now = Date.now();
       let closedCount = 0;
       
-      // Ordena por último acesso (LRU)
+      // Ordena por último acesso (LRU) - Mais antigos primeiro (index 0)
+      // Array.from cria uma cópia, então é seguro modificar o Map durante a iteração baseada nesta lista
       const entries = Array.from(this.pools.entries()).sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
 
-      // 1. Remove expirados por tempo
+      // 1. Remove expirados por tempo (Idle Threshold)
       for (const [key, entry] of entries) {
           if (now - entry.lastAccessed > this.IDLE_THRESHOLD_MS) {
               this.gracefulClose(key, entry);
@@ -70,17 +77,22 @@ export class PoolService {
           }
       }
 
-      // 2. Hard Cap: Se ainda tiver muitos pools, fecha os mais antigos
+      // 2. Hard Cap Protection: Se ainda tiver muitos pools, fecha os mais antigos
+      // Isso previne OOM (Out of Memory) em picos de tráfego com muitos tenants diferentes
       if (this.pools.size > this.MAX_ACTIVE_POOLS) {
-          const toRemove = this.pools.size - this.MAX_ACTIVE_POOLS;
-          console.warn(`[PoolService] Hard Cap Reached (${this.pools.size}). Ejecting ${toRemove} oldest pools.`);
+          const currentSize = this.pools.size;
+          const toRemove = currentSize - this.MAX_ACTIVE_POOLS;
           
-          // Recalcula entries pois alguns podem ter sido removidos no passo 1
-          const remainingEntries = Array.from(this.pools.entries()).sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
-          
-          for (let i = 0; i < toRemove; i++) {
-              if (remainingEntries[i]) {
-                  this.gracefulClose(remainingEntries[i][0], remainingEntries[i][1]);
+          if (toRemove > 0) {
+              console.warn(`[PoolService] Hard Cap Reached (${currentSize}). Ejecting ${toRemove} oldest pools.`);
+              
+              // Recalcula entries pois alguns podem ter sido removidos no passo 1
+              // Filtra apenas os que ainda existem no Map
+              const remainingEntries = entries.filter(([k]) => this.pools.has(k));
+              
+              for (let i = 0; i < toRemove && i < remainingEntries.length; i++) {
+                  const [key, entry] = remainingEntries[i];
+                  this.gracefulClose(key, entry);
                   closedCount++;
               }
           }
@@ -91,9 +103,12 @@ export class PoolService {
 
   private static gracefulClose(key: string, entry: PoolEntry) {
       try {
+          // Fire and forget o fechamento para não travar o loop
           entry.pool.end().catch(e => console.error(`[PoolService] Error closing ${key}:`, e.message));
           this.pools.delete(key);
-      } catch (e) {}
+      } catch (e) {
+          console.error(`[PoolService] Critical error removing pool ${key}`, e);
+      }
   }
 
   /**
@@ -101,12 +116,20 @@ export class PoolService {
    * Suporta lógica de "Project Ejection" via connectionString explícita.
    */
   public static get(dbIdentifier: string, config?: PoolConfig): pg.Pool {
-    // Se connectionString for fornecida, usamos ela como parte da chave única
-    // Isso permite múltiplos pools para o mesmo projeto (ex: Read Replica vs Write Master)
-    const uniqueKey = config?.connectionString 
-        ? `ext_${dbIdentifier}_${Buffer.from(config.connectionString).toString('base64').slice(0, 10)}`
-        : `${dbIdentifier}_${config?.useDirect ? 'direct' : 'pool'}`;
+    // Geração de Chave Única
+    // Se connectionString for fornecida, usamos um hash dela para permitir múltiplos pools para o mesmo DB
+    // mas com credenciais diferentes (ex: Read Replica vs Write Master)
+    let uniqueKey = '';
     
+    if (config?.connectionString) {
+        // Usa Buffer explicitamente importado para compatibilidade
+        const hash = Buffer.from(config.connectionString).toString('base64').slice(0, 10);
+        uniqueKey = `ext_${dbIdentifier}_${hash}`;
+    } else {
+        uniqueKey = `${dbIdentifier}_${config?.useDirect ? 'direct' : 'pool'}`;
+    }
+    
+    // Cache Hit (LRU Update)
     if (this.pools.has(uniqueKey)) {
       const entry = this.pools.get(uniqueKey)!;
       entry.lastAccessed = Date.now();
@@ -139,25 +162,29 @@ export class PoolService {
     const poolConfig = {
       connectionString: dbUrl,
       max: requestedMax,
-      idleTimeoutMillis: config?.idleTimeoutMillis || 60000,
-      connectionTimeoutMillis: config?.connectionTimeoutMillis || 5000, // Fail fast
+      idleTimeoutMillis: config?.idleTimeoutMillis || 60000, // 60s
+      connectionTimeoutMillis: config?.connectionTimeoutMillis || 5000, // Fail fast (5s)
       keepAlive: true,
       application_name: appName,
-      ssl: isExternal ? { rejectUnauthorized: false } : false // Auto-enable SSL para externos
+      // Auto-enable SSL para externos, mas permite self-signed para compatibilidade máxima
+      ssl: isExternal ? { rejectUnauthorized: false } : false 
     };
 
     console.log(`[PoolService] Init ${uniqueKey} (${appName})`);
 
     const pool = new Pool(poolConfig);
 
-    // Hardening de Sessão
+    // Hardening de Sessão: Configura timeout por sessão
     pool.on('connect', (client) => {
-        client.query(`SET statement_timeout TO ${statementTimeout}`).catch(() => {});
+        client.query(`SET statement_timeout TO ${statementTimeout}`).catch(err => {
+            console.warn(`[PoolService] Failed to set statement_timeout on ${uniqueKey}`, err.message);
+        });
     });
 
     pool.on('error', (err) => {
       console.error(`[PoolService] Error on ${uniqueKey}:`, err.message);
-      // Se o banco cair, removemos do cache para forçar reconexão limpa na próxima
+      // Se o banco cair, removemos do cache para forçar reconexão limpa na próxima tentativa
+      // Isso evita que o pool fique em estado zumbi
       if (this.pools.has(uniqueKey)) {
           this.pools.delete(uniqueKey);
       }
@@ -170,7 +197,7 @@ export class PoolService {
         isExternal
     });
     
-    // Trigger Reaper se estivermos no limite
+    // Trigger Reaper imediato se já estivermos no limite (Safety Valve)
     if (this.pools.size > this.MAX_ACTIVE_POOLS) {
         this.reapZombies();
     }
@@ -180,17 +207,16 @@ export class PoolService {
 
   public static async reload(dbName: string) {
       await this.close(dbName);
-      // O próximo .get() recriará o pool
+      // O próximo .get() recriará o pool automaticamente
   }
 
   public static async close(dbIdentifier: string) {
-    // Fecha todas as variantes conhecidas
+    // Fecha todas as variantes conhecidas (direct, pooled, external replicas) que contenham o ID
     const keys = Array.from(this.pools.keys()).filter(k => k.includes(dbIdentifier));
     for (const key of keys) {
         const entry = this.pools.get(key);
         if (entry) {
-            try { await entry.pool.end(); } catch (e) {}
-            this.pools.delete(key);
+            this.gracefulClose(key, entry);
         }
     }
   }
@@ -199,5 +225,6 @@ export class PoolService {
       const promises = Array.from(this.pools.values()).map(entry => entry.pool.end().catch(() => {}));
       await Promise.all(promises);
       this.pools.clear();
+      console.log('[PoolService] All pools closed.');
   }
 }

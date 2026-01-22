@@ -1,6 +1,8 @@
 import { Response, Request } from 'express';
 import { Client } from 'pg';
 import { systemPool } from '../src/config/main.js';
+import { PushService } from './PushService.js';
+import { PoolService } from './PoolService.js';
 
 interface ClientConnection {
     id: string;
@@ -106,9 +108,29 @@ export class RealtimeService {
             await listenerClient.connect();
             await listenerClient.query('LISTEN cascata_events');
 
-            listenerClient.on('notification', (msg) => {
+            listenerClient.on('notification', async (msg) => {
                 if (msg.channel === 'cascata_events' && msg.payload) {
-                    this.broadcast(slug, JSON.parse(msg.payload));
+                    const payload = JSON.parse(msg.payload);
+                    
+                    // 1. Broadcast para Websockets (Frontends conectados)
+                    this.broadcast(slug, payload);
+
+                    // 2. Neural Pulse: Trigger Notification Rules (Async Fire-and-Forget)
+                    // Só dispara se houver credenciais do Firebase configuradas
+                    if (project.metadata?.firebase_config) {
+                        try {
+                            const pool = PoolService.get(project.db_name, { connectionString: project.metadata?.external_db_url });
+                            PushService.processEventTrigger(
+                                slug, 
+                                pool, 
+                                systemPool, 
+                                payload, 
+                                project.metadata.firebase_config
+                            ).catch(err => console.error(`[NeuralPulse] Error processing trigger for ${slug}:`, err));
+                        } catch (err) {
+                            console.error(`[NeuralPulse] Failed to get pool for trigger processing`, err);
+                        }
+                    }
                 }
             });
 
