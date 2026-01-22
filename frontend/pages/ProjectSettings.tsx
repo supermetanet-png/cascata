@@ -4,7 +4,8 @@ import {
   Shield, Key, Globe, Lock, Save, Loader2, CheckCircle2, Copy, 
   Terminal, Eye, EyeOff, RefreshCw, Code, BookOpen, AlertTriangle,
   Server, ExternalLink, Plus, X, Link, CloudLightning, FileText, Info, Trash2,
-  Archive, Download, Upload, HardDrive, FileJson, Database, Zap, Network, Scale
+  Archive, Download, Upload, HardDrive, FileJson, Database, Zap, Network, Scale,
+  Smartphone, MessageSquare
 } from 'lucide-react';
 
 const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
@@ -28,6 +29,10 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
   const [isEjected, setIsEjected] = useState(false);
   const [externalDbUrl, setExternalDbUrl] = useState('');
   const [readReplicaUrl, setReadReplicaUrl] = useState('');
+
+  // Firebase State
+  const [firebaseJson, setFirebaseJson] = useState('');
+  const [hasFirebase, setHasFirebase] = useState(false);
 
   // Security State
   const [revealedKeyValues, setRevealedKeyValues] = useState<Record<string, string>>({});
@@ -122,6 +127,10 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
                 setIsEjected(false);
                 setExternalDbUrl('');
                 setReadReplicaUrl('');
+            }
+
+            if (current.metadata?.firebase_config) {
+                setHasFirebase(true);
             }
         }
         
@@ -244,7 +253,6 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
       
       const metaUpdate: any = { 
           db_config: dbConfig,
-          // BYOD FIELDS: Logic handled in core.ts (middleware) and AdminController (for migration)
           external_db_url: isEjected ? externalDbUrl : null,
           read_replica_url: isEjected && readReplicaUrl ? readReplicaUrl : null
       };
@@ -269,6 +277,40 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
     } finally { 
         setSaving(false); 
     }
+  };
+
+  const handleSaveFirebase = async () => {
+      setSaving(true);
+      try {
+          let firebaseConfig;
+          try {
+              firebaseConfig = JSON.parse(firebaseJson);
+          } catch(e) {
+              throw new Error("JSON Inválido.");
+          }
+
+          if (!firebaseConfig.project_id || !firebaseConfig.private_key || !firebaseConfig.client_email) {
+              throw new Error("JSON incompleto. Requer project_id, private_key, e client_email.");
+          }
+
+          const newMeta = { ...project.metadata, firebase_config: firebaseConfig };
+          
+          await fetch(`/api/control/projects/${projectId}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` },
+              body: JSON.stringify({ metadata: newMeta })
+          });
+
+          setSuccess("FCM Configurado com sucesso!");
+          setHasFirebase(true);
+          setFirebaseJson(''); // Clear input for security
+          fetchProject();
+          setTimeout(() => setSuccess(null), 2000);
+      } catch (e: any) {
+          alert(e.message);
+      } finally {
+          setSaving(false);
+      }
   };
 
   const toggleSchemaExposure = async () => {
@@ -407,6 +449,49 @@ const ProjectSettings: React.FC<{ projectId: string }> = ({ projectId }) => {
                       {!bestCertMatch && (<button onClick={() => window.location.hash = '#/settings'} className="bg-white px-4 py-2 rounded-xl text-xs font-bold text-amber-700 shadow-sm hover:bg-amber-50 transition-colors">Ir para Cofre</button>)}
                   </div>
               )}
+           </div>
+        </div>
+
+        {/* FIREBASE CONFIGURATION (PUSH) - NEW SECTION */}
+        <div className="bg-white border border-slate-200 rounded-[3.5rem] p-12 shadow-sm space-y-10">
+           <h3 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-4"><div className="w-12 h-12 bg-amber-500 text-white rounded-2xl flex items-center justify-center shadow-lg"><Smartphone size={20} /></div>Mobile Push Notifications</h3>
+           
+           <div className="space-y-6">
+              <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${hasFirebase ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-400'}`}>
+                          <Zap size={20}/>
+                      </div>
+                      <div>
+                          <h4 className="text-sm font-bold text-slate-900">{hasFirebase ? 'FCM Ativo' : 'FCM Inativo'}</h4>
+                          <p className="text-[10px] text-slate-500 font-medium">Google Firebase Cloud Messaging</p>
+                      </div>
+                  </div>
+                  {hasFirebase && <span className="text-[9px] font-black text-emerald-600 bg-emerald-50 px-2 py-1 rounded uppercase tracking-widest">Connected</span>}
+              </div>
+
+              <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Service Account JSON (Paste Content)</label>
+                  <textarea 
+                      value={firebaseJson}
+                      onChange={(e) => setFirebaseJson(e.target.value)}
+                      placeholder='{ "type": "service_account", "project_id": "...", ... }'
+                      className="w-full bg-slate-50 border border-slate-100 rounded-2xl p-4 text-xs font-mono text-slate-600 outline-none focus:ring-4 focus:ring-amber-500/10 min-h-[120px]"
+                  />
+                  <p className="text-[9px] text-slate-400 px-2">
+                      Obtenha este arquivo no Console do Firebase &gt; Configurações do Projeto &gt; Contas de Serviço.
+                  </p>
+              </div>
+
+              <div className="flex justify-end">
+                  <button 
+                      onClick={handleSaveFirebase}
+                      disabled={saving || !firebaseJson}
+                      className="bg-amber-500 text-white px-6 py-3 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-amber-600 transition-all shadow-lg flex items-center gap-2"
+                  >
+                      {saving ? <Loader2 size={14} className="animate-spin"/> : <Save size={14} />} Configurar FCM
+                  </button>
+              </div>
            </div>
         </div>
 

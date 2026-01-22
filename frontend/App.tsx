@@ -4,7 +4,7 @@ import {
   Database, Settings, Shield, Activity, Code2, Users, Layers,
   ChevronRight, Plus, Search, Terminal, Server, Key, Bell,
   Command, LogOut, Clock, Settings2, HardDrive, Zap, BookOpen,
-  PanelLeftClose, PanelLeftOpen, Pin, PinOff
+  PanelLeftClose, PanelLeftOpen, Pin, PinOff, Smartphone
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import ProjectDetail from './pages/ProjectDetail';
@@ -19,6 +19,7 @@ import EventManager from './pages/EventManager';
 import ProjectLogs from './pages/ProjectLogs';
 import RLSDesigner from './pages/RLSDesigner';
 import APIDocs from './pages/APIDocs';
+import PushManager from './pages/PushManager';
 import CascataArchitect from './components/CascataArchitect';
 
 const App: React.FC = () => {
@@ -80,6 +81,7 @@ const App: React.FC = () => {
         case 'rpc': return <RPCManager projectId={projectId} />;
         case 'storage': return <StorageExplorer projectId={projectId} />;
         case 'events': return <EventManager projectId={projectId} />;
+        case 'push': return <PushManager projectId={projectId} />;
         case 'logs': return <ProjectLogs projectId={projectId} />;
         case 'docs': return <APIDocs projectId={projectId} />;
         default: return <ProjectDetail projectId={projectId} />;
@@ -193,6 +195,13 @@ const App: React.FC = () => {
                     active={currentHash.includes('/rpc')} 
                     expanded={isExpanded}
                     onClick={() => navigate(`#/project/${selectedProjectId}/rpc`)} 
+                  />
+                  <SidebarItem 
+                    icon={<Smartphone />} 
+                    label="Push Engine" 
+                    active={currentHash.includes('/push')} 
+                    expanded={isExpanded}
+                    onClick={() => navigate(`#/project/${selectedProjectId}/push`)} 
                   />
                   <SidebarItem 
                     icon={<Users />} 
