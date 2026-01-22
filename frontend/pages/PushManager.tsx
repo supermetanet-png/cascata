@@ -49,37 +49,29 @@ const PushManager: React.FC<{ projectId: string }> = ({ projectId }) => {
           const token = localStorage.getItem('cascata_token');
           const headers = { 'Authorization': `Bearer ${token}` };
 
-          // 1. Fetch Rules (Safely)
-          const rulesRes = await fetch(`/api/data/${projectId}/push/rules`, { headers });
-          let rulesData = await rulesRes.json();
-          // BLINDAGEM CONTRA CRASH: Garante que seja array
-          if (!Array.isArray(rulesData)) {
-              console.warn("Rules API returned non-array:", rulesData);
-              rulesData = [];
-          }
-          setRules(rulesData);
-          
-          // 2. Fetch Tables
-          const tablesRes = await fetch(`/api/data/${projectId}/tables`, { headers });
-          let tablesData = await tablesRes.json();
-          if (Array.isArray(tablesData)) {
-              setTables(tablesData.map((t: any) => t.name));
-          } else {
-              setTables([]);
-          }
+          const [rulesRes, tablesRes] = await Promise.all([
+              fetch(`/api/data/${projectId}/push/rules`, { headers }),
+              fetch(`/api/data/${projectId}/tables`, { headers })
+          ]);
 
-          // 3. Fetch Devices
+          setRules(await rulesRes.json());
+          
+          const tbls = await tablesRes.json();
+          setTables(tbls.map((t: any) => t.name));
+
+          // Fetch devices (using existing auth endpoint logic or direct query via RPC if needed)
+          // For now, we simulate fetching devices via a custom SQL query using the generic endpoint
+          // In a real scenario, we might want a dedicated endpoint for devices list
           const devicesRes = await fetch(`/api/data/${projectId}/query`, {
               method: 'POST',
               headers: { ...headers, 'Content-Type': 'application/json' },
               body: JSON.stringify({ sql: "SELECT * FROM auth.user_devices ORDER BY last_active_at DESC LIMIT 50" })
           });
           const devData = await devicesRes.json();
-          setDevices(Array.isArray(devData.rows) ? devData.rows : []);
+          setDevices(devData.rows || []);
 
       } catch (e) {
           console.error("Failed to load push data", e);
-          setError("Erro ao carregar dados. Verifique o console.");
       } finally {
           setLoading(false);
       }
@@ -94,6 +86,10 @@ const PushManager: React.FC<{ projectId: string }> = ({ projectId }) => {
       setSending(true);
       try {
           const token = localStorage.getItem('cascata_token');
+          // Se user_id estiver vazio, isto seria um Broadcast. 
+          // O endpoint atual 'send' espera um user_id único.
+          // Para broadcast real, o backend precisaria de um loop.
+          // Aqui vamos assumir envio único para teste ou implementar lógica de broadcast no backend depois.
           
           if (!campaign.user_id) throw new Error("Para teste manual, defina um User ID (UUID).");
 
@@ -114,13 +110,12 @@ const PushManager: React.FC<{ projectId: string }> = ({ projectId }) => {
               })
           });
 
-          const json = await res.json();
-
           if (!res.ok) {
-              throw new Error(json.error || "Falha no envio.");
+              const err = await res.json();
+              throw new Error(err.error || "Falha no envio.");
           }
 
-          setSuccess("Notificação enviada para a fila de processamento!");
+          setSuccess("Notificação enviada!");
           setTimeout(() => setSuccess(null), 3000);
       } catch (e: any) {
           setError(e.message);
@@ -280,9 +275,8 @@ const PushManager: React.FC<{ projectId: string }> = ({ projectId }) => {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* BLINDAGEM DE RENDERIZAÇÃO: Verifica se rules é array e tem tamanho */}
-                    {Array.isArray(rules) && rules.length === 0 && <div className="col-span-full py-20 text-center text-slate-400 font-bold uppercase text-xs">No active rules defined</div>}
-                    {Array.isArray(rules) && rules.map(rule => (
+                    {rules.length === 0 && <div className="col-span-full py-20 text-center text-slate-400 font-bold uppercase text-xs">No active rules defined</div>}
+                    {rules.map(rule => (
                         <div key={rule.id} className="bg-white border border-slate-200 rounded-[2.5rem] p-8 hover:shadow-xl transition-all group">
                             <div className="flex justify-between items-start mb-6">
                                 <div className="flex items-center gap-4">
