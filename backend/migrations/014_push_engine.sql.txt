@@ -1,22 +1,5 @@
 
--- Tabela de Dispositivos (Catálogo de Tokens FCM)
-CREATE TABLE IF NOT EXISTS auth.user_devices (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-    token TEXT NOT NULL, -- FCM Token
-    platform TEXT CHECK (platform IN ('ios', 'android', 'web', 'other')),
-    app_version TEXT,
-    meta JSONB DEFAULT '{}',
-    is_active BOOLEAN DEFAULT true,
-    last_active_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, token) -- Evita duplicatas para o mesmo usuário
-);
-
-CREATE INDEX IF NOT EXISTS idx_user_devices_user ON auth.user_devices(user_id);
-CREATE INDEX IF NOT EXISTS idx_user_devices_token ON auth.user_devices(token);
-
--- Tabela de Regras de Notificação (O Cérebro)
+-- Tabela de Regras de Notificação (O Cérebro - Global no System DB)
 -- Define gatilhos automáticos baseados em eventos do banco
 CREATE TABLE IF NOT EXISTS system.notification_rules (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -26,13 +9,13 @@ CREATE TABLE IF NOT EXISTS system.notification_rules (
     
     -- Gatilho
     trigger_table TEXT NOT NULL, -- Ex: 'orders'
-    trigger_event TEXT NOT NULL, -- 'INSERT', 'UPDATE', 'DELETE'
+    trigger_event TEXT NOT NULL, -- 'INSERT', 'UPDATE', 'DELETE', 'ALL'
     
-    -- Lógica (Filtro JSON-Logic ou SQL simples simulado no backend)
+    -- Lógica (Filtro simples simulado no backend)
     conditions JSONB DEFAULT '[]', -- Ex: [{"field": "status", "op": "eq", "value": "shipped"}]
     
     -- Destino
-    recipient_column TEXT, -- Coluna na tabela gatilho que contém o user_id. Ex: 'customer_id'
+    recipient_column TEXT NOT NULL, -- Coluna na tabela gatilho que contém o user_id. Ex: 'customer_id'
     
     -- Conteúdo
     title_template TEXT NOT NULL, -- Ex: "Pedido {{id}} Atualizado"
@@ -44,13 +27,14 @@ CREATE TABLE IF NOT EXISTS system.notification_rules (
 
 CREATE INDEX IF NOT EXISTS idx_notif_rules_project ON system.notification_rules(project_slug, trigger_table);
 
--- Histórico de Envios (Auditoria)
+-- Histórico de Envios (Auditoria - Global no System DB)
 CREATE TABLE IF NOT EXISTS system.notification_history (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_slug TEXT NOT NULL,
-    rule_id UUID REFERENCES system.notification_rules(id) ON DELETE SET NULL,
-    user_id UUID, -- Destinatário (se conhecido)
-    status TEXT NOT NULL, -- 'queued', 'sent', 'failed', 'delivered'
-    provider_response JSONB, -- Resposta do FCM
+    user_id UUID, 
+    status TEXT NOT NULL, -- 'queued', 'sent', 'partial', 'failed'
+    provider_response JSONB, 
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_notif_history_project ON system.notification_history(project_slug, created_at DESC);

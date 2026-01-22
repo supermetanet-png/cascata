@@ -3,10 +3,10 @@ import { PoolClient, Client, Pool } from 'pg';
 
 export class DatabaseService {
     /**
-     * Initializes the standard Cascata database structure.
+     * Initializes the standard Cascata database structure for a project.
      */
     public static async initProjectDb(client: PoolClient | Client) {
-        console.log('[DatabaseService] Initializing project structure (Production Mode)...');
+        console.log('[DatabaseService] Initializing project structure (Push Engine Enabled)...');
         
         await client.query(`
             -- Extensions
@@ -23,7 +23,6 @@ export class DatabaseService {
                 last_sign_in_at TIMESTAMPTZ,
                 banned BOOLEAN DEFAULT false,
                 raw_user_meta_data JSONB DEFAULT '{}',
-                -- Email Confirmation & Recovery Fields
                 confirmation_token TEXT,
                 confirmation_sent_at TIMESTAMPTZ,
                 recovery_token TEXT,
@@ -33,9 +32,6 @@ export class DatabaseService {
                 email_change_sent_at TIMESTAMPTZ,
                 email_confirmed_at TIMESTAMPTZ
             );
-
-            CREATE INDEX IF NOT EXISTS idx_users_confirmation_token ON auth.users (confirmation_token);
-            CREATE INDEX IF NOT EXISTS idx_users_recovery_token ON auth.users (recovery_token);
 
             -- Auth Tables: Identities
             CREATE TABLE IF NOT EXISTS auth.identities (
@@ -50,7 +46,24 @@ export class DatabaseService {
                 UNIQUE(provider, identifier)
             );
 
-            -- Auth Tables: Refresh Tokens (Session Management)
+            -- Auth Tables: User Devices (PUSH ENGINE)
+            CREATE TABLE IF NOT EXISTS auth.user_devices (
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+                user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+                token TEXT NOT NULL, -- FCM Token
+                platform TEXT CHECK (platform IN ('ios', 'android', 'web', 'other')),
+                app_version TEXT,
+                meta JSONB DEFAULT '{}',
+                is_active BOOLEAN DEFAULT true,
+                last_active_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(user_id, token)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_devices_user ON auth.user_devices(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_devices_token ON auth.user_devices(token);
+
+            -- Auth Tables: Refresh Tokens
             CREATE TABLE IF NOT EXISTS auth.refresh_tokens (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 token_hash TEXT NOT NULL,
@@ -60,10 +73,8 @@ export class DatabaseService {
                 expires_at TIMESTAMPTZ NOT NULL,
                 parent_token UUID REFERENCES auth.refresh_tokens(id)
             );
-            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_token_hash ON auth.refresh_tokens(token_hash);
-            CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON auth.refresh_tokens(user_id);
 
-            -- Auth Tables: OTP Codes (Passwordless)
+            -- Auth Tables: OTP Codes
             CREATE TABLE IF NOT EXISTS auth.otp_codes (
                 id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 identifier TEXT NOT NULL,
@@ -75,7 +86,6 @@ export class DatabaseService {
                 metadata JSONB DEFAULT '{}',
                 ip_address TEXT
             );
-            CREATE INDEX IF NOT EXISTS idx_otp_codes_expires ON auth.otp_codes (expires_at);
 
             -- SECURITY HARDENING: Roles & Privileges
             DO $$ 
@@ -97,17 +107,12 @@ export class DatabaseService {
                 
                 GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
                 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
-                
                 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO anon, authenticated;
-                GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated;
-
                 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO anon, authenticated;
-                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;
-                ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
             END $$;
         `);
         
-        // OPTIMIZED NOTIFY TRIGGER
+        // TRIGGER NOTIFY
         await client.query(`
             CREATE OR REPLACE FUNCTION public.notify_changes()
             RETURNS trigger AS $$
@@ -138,55 +143,13 @@ export class DatabaseService {
             END;
             $$ LANGUAGE plpgsql;
         `);
-        
-        console.log('[DatabaseService] Initialization complete.');
     }
 
-    /**
-     * Validates a new table definition BEFORE creating it.
-     */
     public static async validateTableDefinition(pool: Pool, tableName: string, columns: any[]) {
         const client = await pool.connect();
         try {
-            // 1. Check if table exists
-            const checkTable = await client.query(
-                "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
-                [tableName]
-            );
-            if (checkTable.rowCount && checkTable.rowCount > 0) {
-                throw new Error(`Table "${tableName}" already exists.`);
-            }
-
-            // 2. Validate Foreign Keys
-            for (const col of columns) {
-                if (col.foreignKey) {
-                    const { table: targetTable, column: targetCol } = col.foreignKey;
-                    
-                    const checkTarget = await client.query(
-                        "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1",
-                        [targetTable]
-                    );
-                    if (!checkTarget.rowCount || checkTarget.rowCount === 0) {
-                        throw new Error(`Foreign Key Error: Target table "${targetTable}" does not exist.`);
-                    }
-
-                    const checkUnique = await client.query(`
-                        SELECT 1 
-                        FROM information_schema.table_constraints tc 
-                        JOIN information_schema.constraint_column_usage ccu 
-                        ON tc.constraint_name = ccu.constraint_name 
-                        WHERE tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE') 
-                        AND tc.table_name = $1 
-                        AND ccu.column_name = $2
-                    `, [targetTable, targetCol]);
-
-                    if (!checkUnique.rowCount || checkUnique.rowCount === 0) {
-                        throw new Error(`Foreign Key Error: Column "${targetCol}" in table "${targetTable}" is not a Primary Key or Unique. Relations must point to unique fields.`);
-                    }
-                }
-            }
-        } finally {
-            client.release();
-        }
+            const checkTable = await client.query("SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1", [tableName]);
+            if (checkTable.rowCount && checkTable.rowCount > 0) throw new Error(`Table "${tableName}" already exists.`);
+        } finally { client.release(); }
     }
 }
