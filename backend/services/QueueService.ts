@@ -4,10 +4,13 @@ import crypto from 'crypto';
 import axios from 'axios';
 import { URL } from 'url';
 import dns from 'dns/promises';
+import { PushService } from './PushService.js';
+import { systemPool } from '../config/main.js';
+import { PoolService } from './PoolService.js';
 
 const REDIS_CONFIG = {
     connection: {
-        host: process.env.REDIS_HOST || 'redis',
+        host: process.env.REDIS_HOST || 'dragonfly',
         port: parseInt(process.env.REDIS_PORT || '6379')
     }
 };
@@ -15,6 +18,9 @@ const REDIS_CONFIG = {
 export class QueueService {
     private static webhookQueue: Queue;
     private static webhookWorker: Worker;
+    
+    private static pushQueue: Queue;
+    private static pushWorker: Worker;
 
     // SSRF Protection (Security)
     private static isPrivateIP(ip: string): boolean {
@@ -45,7 +51,7 @@ export class QueueService {
                 throw new Error("Blocked: localhost access denied");
             }
             
-            const internalServices = ['redis', 'db', 'backend_control', 'backend_data', 'nginx', 'nginx_controller'];
+            const internalServices = ['redis', 'db', 'backend_control', 'backend_data', 'nginx', 'nginx_controller', 'dragonfly'];
             if (internalServices.includes(hostname)) {
                 throw new Error("Blocked: Internal service access denied");
             }
@@ -76,9 +82,9 @@ export class QueueService {
     }
 
     public static init() {
-        console.log('[QueueService] Initializing BullMQ Queues...');
+        console.log('[QueueService] Initializing BullMQ Queues (DragonflyDB)...');
 
-        // 1. Fila Principal
+        // --- 1. WEBHOOK QUEUE ---
         this.webhookQueue = new Queue('cascata-webhooks', {
             ...REDIS_CONFIG,
             defaultJobOptions: {
@@ -87,11 +93,9 @@ export class QueueService {
             }
         });
 
-        // 2. Worker Inteligente
         this.webhookWorker = new Worker('cascata-webhooks', async (job: Job) => {
             const { targetUrl, payload, secret, eventType, tableName, fallbackUrl } = job.data;
             
-            // Re-validate URL on execution
             await this.validateTarget(targetUrl);
 
             const signature = crypto
@@ -100,7 +104,7 @@ export class QueueService {
                 .digest('hex');
 
             try {
-                console.log(`[Queue:Webhook] Processing job ${job.id} -> ${targetUrl} (Attempt ${job.attemptsMade + 1}/${job.opts.attempts})`);
+                console.log(`[Queue:Webhook] Processing job ${job.id} -> ${targetUrl}`);
                 
                 await axios.post(targetUrl, payload, {
                     headers: {
@@ -121,70 +125,78 @@ export class QueueService {
 
                 console.error(`[Queue:Webhook] Failed job ${job.id}: ${errorMsg}`);
 
-                // --- FALLBACK TRIGGER LOGIC ---
-                // Se for a última tentativa E houver URL de fallback configurada
                 if (isLastAttempt && fallbackUrl) {
-                    console.warn(`[Queue:Webhook] Triggering Fallback Alert for job ${job.id} -> ${fallbackUrl}`);
-                    
-                    const alertPayload = {
-                        alert: "Webhook Delivery Failed (Final)",
-                        original_target: targetUrl,
-                        error: errorMsg,
-                        event: eventType,
-                        table: tableName,
-                        failed_at: new Date().toISOString(),
-                        original_payload: payload // Include original data so user can manually recover in n8n/Zapier
-                    };
-
                     try {
-                        // Validate Fallback URL first
                         await this.validateTarget(fallbackUrl);
-                        
-                        await axios.post(fallbackUrl, alertPayload, {
-                            headers: { 'Content-Type': 'application/json', 'User-Agent': 'Cascata-Alert-System' },
-                            timeout: 5000
-                        });
-                        console.log(`[Queue:Webhook] Fallback alert sent successfully.`);
-                    } catch (fbError: any) {
-                        console.error(`[Queue:Webhook] Fallback FAILED: ${fbError.message}`);
-                    }
+                        await axios.post(fallbackUrl, {
+                            alert: "Webhook Delivery Failed (Final)",
+                            original_target: targetUrl,
+                            error: errorMsg,
+                            event: eventType
+                        }, { timeout: 5000 });
+                    } catch (fbError) { /* ignore */ }
                 }
-                
-                // Se a resposta for 4xx (Erro do Cliente), NÃO RETENTAR (a menos que seja 429)
-                if (error.response && error.response.status >= 400 && error.response.status < 500 && error.response.status !== 429) {
-                    // Mas ainda queremos que o Fallback dispare acima, então jogamos o erro aqui para marcar como failed
-                    // Como não estamos usando UnrecoverableError, apenas deixamos falhar.
-                }
-                
                 throw error; 
             }
         }, REDIS_CONFIG);
 
-        this.webhookWorker.on('failed', (job, err) => {
-            // Logs de falha definitiva
+        // --- 2. PUSH NOTIFICATION QUEUE (NEW) ---
+        this.pushQueue = new Queue('cascata-push', {
+            ...REDIS_CONFIG,
+            defaultJobOptions: {
+                removeOnComplete: 100, // Keep last 100
+                removeOnFail: 500
+            }
+        });
+
+        this.pushWorker = new Worker('cascata-push', async (job: Job) => {
+            const { projectSlug, userId, notification, fcmConfig, dbName, externalDbUrl } = job.data;
+            
+            try {
+                console.log(`[Queue:Push] Processing push for User ${userId} (Project: ${projectSlug})`);
+                
+                // Get Pool dynamically inside the worker
+                // NOTE: In strict microservices, Workers might not have direct DB access, 
+                // but Cascata is a Monolith/Hybrid, so we share the PoolService.
+                const pool = PoolService.get(dbName, { connectionString: externalDbUrl });
+
+                const result = await PushService.processDelivery(
+                    pool,
+                    systemPool,
+                    projectSlug,
+                    userId,
+                    notification,
+                    fcmConfig
+                );
+
+                if (!result.success && result.reason !== 'no_devices') {
+                    throw new Error(`Push failed: ${JSON.stringify(result)}`);
+                }
+
+                return result;
+
+            } catch (error: any) {
+                console.error(`[Queue:Push] Failed job ${job.id}:`, error.message);
+                throw error;
+            }
+        }, { 
+            ...REDIS_CONFIG, 
+            concurrency: 50 // High concurrency for push notifications
         });
     }
 
     public static async addWebhookJob(data: any) {
-        if (!this.webhookQueue) {
-            this.init();
-        }
+        if (!this.webhookQueue) this.init();
+        const attempts = data.retryPolicy === 'none' ? 1 : (data.retryPolicy === 'linear' ? 5 : 10);
+        await this.webhookQueue.add('dispatch', data, { attempts });
+    }
 
-        // Apply Retry Policy per Job
-        const policy = data.retryPolicy || 'standard';
-        let attempts = 10;
-        let backoff: any = { type: 'exponential', delay: 1000 };
-
-        if (policy === 'none') {
-            attempts = 1; // Critical / Payment mode
-        } else if (policy === 'linear') {
-            attempts = 5;
-            backoff = { type: 'fixed', delay: 5000 }; // Retry every 5s
-        }
-
-        await this.webhookQueue.add('dispatch', data, {
-            attempts,
-            backoff
+    public static async addPushJob(data: any) {
+        if (!this.pushQueue) this.init();
+        // Push jobs are usually fire-and-forget, but we retry on network errors
+        await this.pushQueue.add('send', data, { 
+            attempts: 3, 
+            backoff: { type: 'exponential', delay: 1000 } 
         });
     }
 
