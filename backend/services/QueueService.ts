@@ -4,9 +4,11 @@ import crypto from 'crypto';
 import axios from 'axios';
 import { URL } from 'url';
 import dns from 'dns/promises';
-import { PushService } from './PushService.js';
 import { systemPool } from '../config/main.js';
 import { PoolService } from './PoolService.js';
+
+// NOTA: PushService removido do import estático para evitar Dependência Circular
+// import { PushService } from './PushService.js'; 
 
 const REDIS_CONFIG = {
     connection: {
@@ -156,9 +158,10 @@ export class QueueService {
                 console.log(`[Queue:Push] Processing push for User ${userId} (Project: ${projectSlug})`);
                 
                 // Get Pool dynamically inside the worker
-                // NOTE: In strict microservices, Workers might not have direct DB access, 
-                // but Cascata is a Monolith/Hybrid, so we share the PoolService.
                 const pool = PoolService.get(dbName, { connectionString: externalDbUrl });
+
+                // DYNAMIC IMPORT: Resolve circular dependency
+                const { PushService } = await import('./PushService.js');
 
                 const result = await PushService.processDelivery(
                     pool,
